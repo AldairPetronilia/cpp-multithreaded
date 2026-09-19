@@ -1,19 +1,21 @@
 #pragma once
 
-#include "trading/api.hpp"
-#include "trading/workers.hpp"
+#include "trading/system.hpp"
 
+#include <chrono>
+#include <cstdint>
+#include <optional>
 #include <string>
 
 namespace trading {
 
 struct AppConfig {
-    MarketDataProducerConfig market_data;
-    SignalProcessorConfig signal;
-    OrderExecutionConfig execution;
-    PositionMonitorConfig position_monitor;
-    ApiManagerConfig api_manager;
-    MockApiConfig mock_api;
+    SystemConfig system{SystemConfig::demo()};
+    bool dashboard{false};
+    std::uint16_t dashboard_port{8080};
+    std::chrono::milliseconds dashboard_interval{200};
+    // Stop after this long even if the feeds have more to publish.
+    std::optional<std::chrono::seconds> duration{};
     bool show_help{false};
 
     static AppConfig from_command_line(int argc, char* argv[]);
@@ -21,4 +23,3 @@ struct AppConfig {
 };
 
 }  // namespace trading
-

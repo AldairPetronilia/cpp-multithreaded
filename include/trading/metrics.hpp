@@ -1,74 +1,69 @@
 #pragma once
 
-#include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
-#include <mutex>
-#include <numeric>
 #include <vector>
 
 namespace trading {
 
 struct LatencySummary {
-    std::size_t count{};
-    double minimum_us{};
+    std::uint64_t count{};
     double mean_us{};
     double p50_us{};
     double p95_us{};
     double p99_us{};
-    double maximum_us{};
+    double max_us{};
 };
 
-class LatencyRecorder {
+// Point-in-time copy of a LatencyHistogram. Subtracting an earlier snapshot of the same
+// histogram yields the distribution of the samples recorded in between, which is how the
+// dashboard reports live (per-interval) percentiles next to cumulative ones.
+class HistogramSnapshot {
 public:
-    void record(std::chrono::nanoseconds value) {
-        std::lock_guard lock(mutex_);
-        samples_.push_back(value.count());
-    }
-
-    [[nodiscard]] std::size_t size() const {
-        std::lock_guard lock(mutex_);
-        return samples_.size();
-    }
-
-    [[nodiscard]] LatencySummary summarize() const {
-        std::vector<std::int64_t> values;
-        {
-            std::lock_guard lock(mutex_);
-            values = samples_;
-        }
-
-        if (values.empty()) {
-            return {};
-        }
-
-        std::sort(values.begin(), values.end());
-        const auto percentile = [&values](double fraction) {
-            const auto raw_index = fraction * static_cast<double>(values.size() - 1U);
-            const auto index = static_cast<std::size_t>(std::ceil(raw_index));
-            return static_cast<double>(values[index]) / 1'000.0;
-        };
-
-        const auto total = std::accumulate(
-            values.begin(), values.end(), static_cast<long double>(0.0));
-        return LatencySummary{
-            values.size(),
-            static_cast<double>(values.front()) / 1'000.0,
-            static_cast<double>(total / static_cast<long double>(values.size())) / 1'000.0,
-            percentile(0.50),
-            percentile(0.95),
-            percentile(0.99),
-            static_cast<double>(values.back()) / 1'000.0,
-        };
-    }
+    [[nodiscard]] std::uint64_t count() const noexcept { return count_; }
+    [[nodiscard]] double percentile_ns(double fraction) const noexcept;
+    [[nodiscard]] double mean_ns() const noexcept;
+    [[nodiscard]] double max_ns() const noexcept;
+    [[nodiscard]] LatencySummary summary() const noexcept;
+    [[nodiscard]] HistogramSnapshot since(const HistogramSnapshot& earlier) const;
 
 private:
-    mutable std::mutex mutex_;
-    std::vector<std::int64_t> samples_;
+    friend class LatencyHistogram;
+
+    std::vector<std::uint64_t> counts_;
+    std::uint64_t count_{};
+    std::uint64_t sum_ns_{};
+    std::uint64_t max_ns_{};
+    bool exact_max_{true};
+};
+
+// Log-linear histogram in the style of HdrHistogram: 32 linear sub-buckets per power of two,
+// so every value is reported within ~3% of what was recorded. Memory is fixed (8 KiB) and
+// recording is a handful of relaxed atomic increments, so monitoring can read it while
+// workers record, without the unbounded growth and hot-path locking of storing samples.
+class LatencyHistogram {
+public:
+    static constexpr unsigned kSubBucketBits = 5;
+    static constexpr std::uint64_t kSubBucketCount = std::uint64_t{1} << kSubBucketBits;
+    // Values at or above 2^36 ns (about 68.7 s) are recorded in the last bucket.
+    static constexpr unsigned kValueBits = 36;
+    static constexpr std::size_t kBucketCount =
+        (kValueBits - kSubBucketBits + 1U) * kSubBucketCount;
+
+    void record(std::chrono::nanoseconds value) noexcept;
+    [[nodiscard]] HistogramSnapshot snapshot() const;
+    [[nodiscard]] LatencySummary summary() const { return snapshot().summary(); }
+
+    [[nodiscard]] static std::size_t bucket_index(std::uint64_t value_ns) noexcept;
+    [[nodiscard]] static std::uint64_t bucket_upper_bound(std::size_t index) noexcept;
+
+private:
+    std::array<std::atomic<std::uint64_t>, kBucketCount> counts_{};
+    std::atomic<std::uint64_t> sum_ns_{0};
+    std::atomic<std::uint64_t> max_ns_{0};
 };
 
 }  // namespace trading
-

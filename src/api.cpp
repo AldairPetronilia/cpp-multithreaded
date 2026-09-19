@@ -15,6 +15,9 @@
 namespace trading {
 namespace {
 
+// Exact sliding window over request start times: at most max_requests starts in any
+// window-length interval. Unlike a token bucket it never allows a burst above the limit,
+// which is what a broker enforcing "N requests per window" expects.
 class SlidingWindowRateLimiter {
 public:
     explicit SlidingWindowRateLimiter(RateLimitConfig config) : config_(config) {
@@ -34,15 +37,13 @@ public:
             }
 
             const auto now = MonotonicClock::now();
-            while (!request_starts_.empty() &&
-                   request_starts_.front() + config_.window <= now) {
+            while (!request_starts_.empty() && request_starts_.front() + config_.window <= now) {
                 request_starts_.pop_front();
             }
 
             auto permitted_at = std::max(now, deferred_until_);
             if (request_starts_.size() >= config_.max_requests) {
-                permitted_at = std::max(permitted_at,
-                                        request_starts_.front() + config_.window);
+                permitted_at = std::max(permitted_at, request_starts_.front() + config_.window);
             }
 
             if (permitted_at <= now) {
@@ -55,6 +56,7 @@ public:
         }
     }
 
+    // Applies a server-requested pause (HTTP 429 / Retry-After) to every I/O thread.
     void defer_for(std::chrono::milliseconds duration) {
         if (duration <= std::chrono::milliseconds::zero()) {
             return;
@@ -66,9 +68,21 @@ public:
         wakeup_.notify_all();
     }
 
+    [[nodiscard]] RateLimiterStats stats() const {
+        std::lock_guard lock(mutex_);
+        const auto now = MonotonicClock::now();
+        const auto in_window = static_cast<std::size_t>(std::count_if(
+            request_starts_.begin(), request_starts_.end(),
+            [&](TimePoint start) { return start + config_.window > now; }));
+        const auto paused_for = deferred_until_ > now
+                                    ? std::chrono::ceil<std::chrono::milliseconds>(deferred_until_ - now)
+                                    : std::chrono::milliseconds::zero();
+        return RateLimiterStats{in_window, config_.max_requests, config_.window, paused_for};
+    }
+
 private:
-    RateLimitConfig config_;
-    std::mutex mutex_;
+    const RateLimitConfig config_;
+    mutable std::mutex mutex_;
     std::condition_variable_any wakeup_;
     std::deque<TimePoint> request_starts_;
     TimePoint deferred_until_{};
@@ -81,15 +95,21 @@ private:
            response.status_code >= 500;
 }
 
-[[nodiscard]] std::chrono::milliseconds exponential_backoff(
-    std::chrono::milliseconds initial,
-    std::chrono::milliseconds maximum,
-    std::size_t completed_attempts) {
+[[nodiscard]] std::chrono::milliseconds exponential_backoff(std::chrono::milliseconds initial,
+                                                            std::chrono::milliseconds maximum,
+                                                            std::size_t completed_attempts) {
     auto result = initial;
     for (std::size_t index = 1; index < completed_attempts && result < maximum; ++index) {
         result = std::min(maximum, result * 2);
     }
     return result;
+}
+
+[[nodiscard]] ApiResponse cancelled_response(const char* message) {
+    ApiResponse response;
+    response.error = ApiError::cancelled;
+    response.message = message;
+    return response;
 }
 
 }  // namespace
@@ -112,9 +132,8 @@ const char* to_string(ApiError error) noexcept {
     return "unknown";
 }
 
-RequestHandle::RequestHandle(
-    std::uint64_t id,
-    std::shared_ptr<detail::RequestCancellation> cancellation)
+RequestHandle::RequestHandle(std::uint64_t id,
+                             std::shared_ptr<detail::RequestCancellation> cancellation)
     : id_(id), cancellation_(std::move(cancellation)) {}
 
 void RequestHandle::cancel() const {
@@ -174,9 +193,7 @@ public:
         }
     }
 
-    ~Impl() {
-        shutdown(ApiShutdownMode::cancel_pending);
-    }
+    ~Impl() { shutdown(ApiShutdownMode::cancel_pending, std::nullopt); }
 
     SubmitResult submit(ApiRequest request, ApiCompletion completion) {
         if (!completion) {
@@ -211,7 +228,7 @@ public:
         state->not_before = now;
 
         requests_.emplace(id, state);
-        pending_.push_back(state);
+        pending_.push_back(std::move(state));
         max_pending_ = std::max(max_pending_, pending_.size());
         ++accepted_;
         lock.unlock();
@@ -219,33 +236,35 @@ public:
         return {SubmitStatus::accepted, RequestHandle(id, std::move(cancellation))};
     }
 
-    void shutdown(ApiShutdownMode mode) {
+    void shutdown(ApiShutdownMode mode, std::optional<std::chrono::milliseconds> drain_timeout) {
+        // Serialises concurrent callers (e.g. an explicit shutdown racing the destructor).
+        std::lock_guard shutdown_lock(shutdown_mutex_);
         std::unique_lock lock(mutex_);
         if (joined_) {
             return;
         }
         accepting_ = false;
         if (mode == ApiShutdownMode::cancel_pending) {
-            const auto now = MonotonicClock::now();
-            for (auto& [id, state] : requests_) {
-                static_cast<void>(id);
-                state->cancellation->source.request_stop();
-                state->not_before = now;
-            }
+            cancel_all_locked();
         }
         lock.unlock();
         pending_wakeup_->notify_all();
 
         lock.lock();
+        if (mode == ApiShutdownMode::drain && drain_timeout &&
+            !finished_wakeup_.wait_for(lock, *drain_timeout, [this] { return requests_.empty(); })) {
+            cancel_all_locked();
+            lock.unlock();
+            pending_wakeup_->notify_all();
+            lock.lock();
+        }
         finished_wakeup_.wait(lock, [this] { return requests_.empty(); });
         stopping_ = true;
         lock.unlock();
         pending_wakeup_->notify_all();
 
         for (auto& worker : workers_) {
-            if (worker.joinable()) {
-                worker.join();
-            }
+            worker.join();
         }
         workers_.clear();
 
@@ -254,23 +273,43 @@ public:
     }
 
     [[nodiscard]] ApiManagerStats stats() const {
-        std::lock_guard lock(mutex_);
-        return ApiManagerStats{
-            accepted_,
-            rejected_full_,
-            rejected_shutdown_,
-            completed_,
-            failed_,
-            cancelled_,
-            retries_,
-            requests_.size(),
-            pending_.size(),
-            active_,
-            max_pending_,
-        };
+        ApiManagerStats stats;
+        {
+            std::lock_guard lock(mutex_);
+            stats.accepted = accepted_;
+            stats.rejected_full = rejected_full_;
+            stats.rejected_shutdown = rejected_shutdown_;
+            stats.completed = completed_;
+            stats.failed = failed_;
+            stats.cancelled = cancelled_;
+            stats.retries = retries_;
+            stats.outstanding = requests_.size();
+            stats.pending = pending_.size();
+            stats.active = active_;
+            stats.max_pending = max_pending_;
+        }
+        stats.rate_limited_responses = rate_limited_responses_.load(std::memory_order_relaxed);
+        stats.timeouts = timeouts_.load(std::memory_order_relaxed);
+        stats.connection_failures = connection_failures_.load(std::memory_order_relaxed);
+        stats.capacity = config_.max_outstanding_requests;
+        stats.io_threads = config_.io_threads;
+        stats.limiter = limiter_.stats();
+        return stats;
     }
 
 private:
+    void cancel_all_locked() {
+        const auto now = MonotonicClock::now();
+        for (auto& [id, state] : requests_) {
+            static_cast<void>(id);
+            state->cancellation->source.request_stop();
+            state->not_before = now;
+        }
+    }
+
+    // Picks the pending request that may run soonest; cancelled requests go first so their
+    // completions are not held behind rate-limit or retry delays. The linear scan is bounded
+    // by max_outstanding_requests and is negligible next to API latency.
     std::shared_ptr<RequestState> take_next(std::stop_token worker_stop) {
         std::unique_lock lock(mutex_);
         for (;;) {
@@ -287,15 +326,14 @@ private:
             const auto now = MonotonicClock::now();
             auto selected = pending_.end();
             auto selected_time = TimePoint::max();
-            std::uint64_t selected_sequence = std::numeric_limits<std::uint64_t>::max();
+            auto selected_sequence = std::numeric_limits<std::uint64_t>::max();
             for (auto iterator = pending_.begin(); iterator != pending_.end(); ++iterator) {
                 const auto& candidate = *iterator;
                 const auto candidate_time = candidate->cancellation->source.stop_requested()
                                                 ? TimePoint::min()
                                                 : candidate->not_before;
                 if (candidate_time < selected_time ||
-                    (candidate_time == selected_time &&
-                     candidate->queue_sequence < selected_sequence)) {
+                    (candidate_time == selected_time && candidate->queue_sequence < selected_sequence)) {
                     selected = iterator;
                     selected_time = candidate_time;
                     selected_sequence = candidate->queue_sequence;
@@ -321,32 +359,33 @@ private:
         }
     }
 
+    void count_failure(const ApiResponse& response) noexcept {
+        if (response.status_code == 429 || response.error == ApiError::rate_limited) {
+            rate_limited_responses_.fetch_add(1, std::memory_order_relaxed);
+        } else if (response.error == ApiError::timeout) {
+            timeouts_.fetch_add(1, std::memory_order_relaxed);
+        } else if (response.error == ApiError::connection_failure) {
+            connection_failures_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
     void process(std::shared_ptr<RequestState> state) {
         const auto cancellation = state->cancellation->source.get_token();
         if (cancellation.stop_requested()) {
-            ApiResponse response;
-            response.error = ApiError::cancelled;
-            response.message = "request cancelled before dispatch";
-            finish(std::move(state), std::move(response));
+            finish(std::move(state), cancelled_response("request cancelled before dispatch"));
             return;
         }
 
         std::chrono::nanoseconds limiter_wait{};
-        if (!limiter_.acquire(cancellation, limiter_wait)) {
-            state->rate_limit_wait += limiter_wait;
-            ApiResponse response;
-            response.error = ApiError::cancelled;
-            response.message = "request cancelled while waiting for rate-limit capacity";
-            finish(std::move(state), std::move(response));
+        const bool permitted = limiter_.acquire(cancellation, limiter_wait);
+        state->rate_limit_wait += limiter_wait;
+        if (!permitted) {
+            finish(std::move(state),
+                   cancelled_response("request cancelled while waiting for rate-limit capacity"));
             return;
         }
-        state->rate_limit_wait += limiter_wait;
-
         if (cancellation.stop_requested()) {
-            ApiResponse response;
-            response.error = ApiError::cancelled;
-            response.message = "request cancelled before API call";
-            finish(std::move(state), std::move(response));
+            finish(std::move(state), cancelled_response("request cancelled before API call"));
             return;
         }
 
@@ -362,37 +401,34 @@ private:
             response.message = "API client threw an unknown exception";
         }
         state->service_time += MonotonicClock::now() - service_started;
+        count_failure(response);
 
         if (response.status_code == 429 || response.error == ApiError::rate_limited) {
-            const auto retry_after = response.retry_after > std::chrono::milliseconds::zero()
-                                         ? response.retry_after
-                                         : config_.initial_retry_backoff;
-            limiter_.defer_for(retry_after);
+            limiter_.defer_for(response.retry_after > std::chrono::milliseconds::zero()
+                                   ? response.retry_after
+                                   : config_.initial_retry_backoff);
         }
 
-        const bool retry_safe = state->request.idempotent &&
-                                !state->request.idempotency_key.empty();
+        // Only idempotent requests carrying a key are retried: the key lets the server
+        // discard a duplicate if the first attempt actually executed.
+        const bool retry_safe = state->request.idempotent && !state->request.idempotency_key.empty();
         if (!cancellation.stop_requested() && retry_safe && is_retryable(response) &&
             state->attempt <= config_.max_retries) {
             const auto delay = response.retry_after > std::chrono::milliseconds::zero()
                                    ? response.retry_after
                                    : exponential_backoff(config_.initial_retry_backoff,
-                                                         config_.max_retry_backoff,
-                                                         state->attempt);
+                                                         config_.max_retry_backoff, state->attempt);
             requeue_for_retry(std::move(state), delay);
             return;
         }
 
         if (cancellation.stop_requested() && response.error != ApiError::cancelled) {
-            response.error = ApiError::cancelled;
-            response.status_code = 0;
-            response.message = "request cancelled";
+            response = cancelled_response("request cancelled");
         }
         finish(std::move(state), std::move(response));
     }
 
-    void requeue_for_retry(std::shared_ptr<RequestState> state,
-                           std::chrono::milliseconds delay) {
+    void requeue_for_retry(std::shared_ptr<RequestState> state, std::chrono::milliseconds delay) {
         const auto now = MonotonicClock::now();
         std::unique_lock lock(mutex_);
         --active_;
@@ -414,6 +450,8 @@ private:
         response.timing.service_time = state->service_time;
         response.timing.total_time = MonotonicClock::now() - state->submitted_at;
 
+        // The completion runs before the request is erased, so a drain shutdown returns
+        // only after every completion (and anything it publishes) has happened.
         bool callback_failed = false;
         try {
             state->completion(response);
@@ -445,9 +483,10 @@ private:
     }
 
     std::shared_ptr<IApiClient> client_;
-    ApiManagerConfig config_;
+    const ApiManagerConfig config_;
     SlidingWindowRateLimiter limiter_;
     std::shared_ptr<std::condition_variable> pending_wakeup_;
+    std::mutex shutdown_mutex_;
     mutable std::mutex mutex_;
     std::condition_variable finished_wakeup_;
     std::deque<std::shared_ptr<RequestState>> pending_;
@@ -467,10 +506,12 @@ private:
     std::uint64_t retries_{};
     std::size_t active_{};
     std::size_t max_pending_{};
+    std::atomic<std::uint64_t> rate_limited_responses_{0};
+    std::atomic<std::uint64_t> timeouts_{0};
+    std::atomic<std::uint64_t> connection_failures_{0};
 };
 
-ApiRequestManager::ApiRequestManager(std::shared_ptr<IApiClient> client,
-                                     ApiManagerConfig config)
+ApiRequestManager::ApiRequestManager(std::shared_ptr<IApiClient> client, ApiManagerConfig config)
     : impl_(std::make_unique<Impl>(std::move(client), config)) {}
 
 ApiRequestManager::~ApiRequestManager() = default;
@@ -479,26 +520,33 @@ SubmitResult ApiRequestManager::submit(ApiRequest request, ApiCompletion complet
     return impl_->submit(std::move(request), std::move(completion));
 }
 
-void ApiRequestManager::shutdown(ApiShutdownMode mode) {
-    impl_->shutdown(mode);
+void ApiRequestManager::shutdown(ApiShutdownMode mode,
+                                 std::optional<std::chrono::milliseconds> drain_timeout) {
+    impl_->shutdown(mode, drain_timeout);
 }
 
 ApiManagerStats ApiRequestManager::stats() const {
     return impl_->stats();
 }
 
-MockTradingApi::MockTradingApi(MockApiConfig config) : config_(config) {
+MockTradingApi::MockTradingApi(MockApiConfig config)
+    : config_(config),
+      latency_ms_(config.latency.count()),
+      respond_429_every_(config.respond_429_every) {
     if (config_.latency < std::chrono::milliseconds::zero() ||
         config_.retry_after < std::chrono::milliseconds::zero()) {
         throw std::invalid_argument("mock API durations must not be negative");
     }
+    if (config_.idempotency_capacity == 0U) {
+        throw std::invalid_argument("mock API idempotency capacity must be positive");
+    }
 }
 
-ApiResponse MockTradingApi::perform(const ApiRequest& request,
-                                    std::stop_token cancellation) {
+ApiResponse MockTradingApi::perform(const ApiRequest& request, std::stop_token cancellation) {
     const auto invocation = invocation_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+    const bool deduplicate = request.idempotent && !request.idempotency_key.empty();
 
-    if (request.idempotent && !request.idempotency_key.empty()) {
+    if (deduplicate) {
         std::lock_guard lock(idempotency_mutex_);
         const auto found = completed_idempotent_requests_.find(request.idempotency_key);
         if (found != completed_idempotent_requests_.end()) {
@@ -506,7 +554,8 @@ ApiResponse MockTradingApi::perform(const ApiRequest& request,
         }
     }
 
-    const auto wait_duration = std::min(config_.latency, request.timeout);
+    const auto simulated_latency = latency();
+    const auto wait_duration = std::min(simulated_latency, request.timeout);
     if (wait_duration > std::chrono::milliseconds::zero()) {
         std::mutex sleep_mutex;
         std::condition_variable_any sleeper;
@@ -514,28 +563,24 @@ ApiResponse MockTradingApi::perform(const ApiRequest& request,
         sleeper.wait_for(lock, cancellation, wait_duration, [] { return false; });
     }
 
+    ApiResponse response;
     if (cancellation.stop_requested()) {
-        ApiResponse response;
         response.error = ApiError::cancelled;
         response.message = "mock API call cancelled";
         return response;
     }
-    if (config_.latency > request.timeout) {
-        ApiResponse response;
+    if (simulated_latency > request.timeout) {
         response.error = ApiError::timeout;
         response.message = "mock API timeout";
         return response;
     }
-    if (config_.fail_connection_every > 0U &&
-        invocation % config_.fail_connection_every == 0U) {
-        ApiResponse response;
+    if (config_.fail_connection_every > 0U && invocation % config_.fail_connection_every == 0U) {
         response.error = ApiError::connection_failure;
         response.message = "simulated connection failure";
         return response;
     }
-    if (config_.respond_429_every > 0U &&
-        invocation % config_.respond_429_every == 0U) {
-        ApiResponse response;
+    const auto every_429 = respond_429_every();
+    if (every_429 > 0U && invocation % every_429 == 0U) {
         response.status_code = 429;
         response.error = ApiError::rate_limited;
         response.message = "simulated HTTP 429";
@@ -543,24 +588,48 @@ ApiResponse MockTradingApi::perform(const ApiRequest& request,
         return response;
     }
 
-    ApiResponse response;
     response.status_code = 200;
     response.body = "filled:" + request.idempotency_key;
     response.message = "simulated order filled";
-
-    if (request.idempotent && !request.idempotency_key.empty()) {
-        std::lock_guard lock(idempotency_mutex_);
-        const auto [iterator, inserted] =
-            completed_idempotent_requests_.emplace(request.idempotency_key, response);
-        if (!inserted) {
-            return iterator->second;
-        }
+    if (deduplicate) {
+        remember(request.idempotency_key, response);
     }
     return response;
 }
 
+void MockTradingApi::remember(const std::string& key, const ApiResponse& response) {
+    std::lock_guard lock(idempotency_mutex_);
+    if (!completed_idempotent_requests_.emplace(key, response).second) {
+        return;
+    }
+    idempotency_order_.push_back(key);
+    while (idempotency_order_.size() > config_.idempotency_capacity) {
+        completed_idempotent_requests_.erase(idempotency_order_.front());
+        idempotency_order_.pop_front();
+    }
+}
+
 std::uint64_t MockTradingApi::invocation_count() const noexcept {
     return invocation_count_.load(std::memory_order_relaxed);
+}
+
+void MockTradingApi::set_latency(std::chrono::milliseconds latency) {
+    if (latency < std::chrono::milliseconds::zero()) {
+        throw std::invalid_argument("mock API latency must not be negative");
+    }
+    latency_ms_.store(latency.count(), std::memory_order_relaxed);
+}
+
+void MockTradingApi::set_respond_429_every(std::size_t every_nth) {
+    respond_429_every_.store(every_nth, std::memory_order_relaxed);
+}
+
+std::chrono::milliseconds MockTradingApi::latency() const noexcept {
+    return std::chrono::milliseconds(latency_ms_.load(std::memory_order_relaxed));
+}
+
+std::size_t MockTradingApi::respond_429_every() const noexcept {
+    return respond_429_every_.load(std::memory_order_relaxed);
 }
 
 }  // namespace trading

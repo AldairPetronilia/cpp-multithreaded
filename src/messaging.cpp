@@ -6,53 +6,80 @@
 
 namespace trading {
 
-BoundedMailbox::BoundedMailbox(std::size_t capacity) : capacity_(capacity) {
+BoundedMailbox::BoundedMailbox(std::size_t capacity, OverflowPolicy policy)
+    : policy_(policy) {
     if (capacity == 0U) {
         throw std::invalid_argument("mailbox capacity must be greater than zero");
     }
+    slots_.resize(capacity);
 }
 
 EnqueueResult BoundedMailbox::try_enqueue(const EventEnvelope& event) {
+    // Declared before the lock so an evicted payload is released outside the critical section.
+    EventEnvelope evicted;
     std::unique_lock lock(mutex_);
     if (closed_) {
+        ++rejected_closed_;
         return EnqueueResult::closed;
     }
-    if (queue_.size() >= capacity_) {
-        rejected_full_.fetch_add(1, std::memory_order_relaxed);
-        return EnqueueResult::full;
+    if (size_ == slots_.size()) {
+        if (policy_ == OverflowPolicy::reject_newest) {
+            ++rejected_full_;
+            return EnqueueResult::full;
+        }
+        pop_front_locked(evicted);
+        ++evicted_oldest_;
     }
 
-    queue_.push_back(event);
-    const auto depth = queue_.size();
-    auto previous = max_depth_.load(std::memory_order_relaxed);
-    while (depth > previous &&
-           !max_depth_.compare_exchange_weak(
-               previous, depth, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    auto tail = head_ + size_;
+    if (tail >= slots_.size()) {
+        tail -= slots_.size();
     }
+    slots_[tail] = event;
+    ++size_;
+    ++accepted_;
+    max_depth_ = std::max(max_depth_, size_);
+    const bool consumer_waiting = waiting_consumers_ > 0U;
     lock.unlock();
-    available_.notify_one();
+    // A busy consumer re-checks the queue before waiting, so it needs no notification.
+    if (consumer_waiting) {
+        available_.notify_one();
+    }
     return EnqueueResult::accepted;
 }
 
-bool BoundedMailbox::wait_pop(EventEnvelope& event) {
+bool BoundedMailbox::wait_pop_batch(std::vector<EventEnvelope>& batch, std::size_t max_batch) {
+    batch.clear();
     std::unique_lock lock(mutex_);
-    available_.wait(lock, [this] { return closed_ || !queue_.empty(); });
-    if (queue_.empty()) {
+    ++waiting_consumers_;
+    available_.wait(lock, [this] { return closed_ || size_ > 0U; });
+    --waiting_consumers_;
+    if (size_ == 0U) {
         return false;
     }
-    event = std::move(queue_.front());
-    queue_.pop_front();
+    const auto count = std::min(size_, std::max<std::size_t>(max_batch, 1U));
+    for (std::size_t index = 0; index < count; ++index) {
+        pop_front_locked(batch.emplace_back());
+    }
     return true;
 }
 
 bool BoundedMailbox::try_pop(EventEnvelope& event) {
     std::lock_guard lock(mutex_);
-    if (queue_.empty()) {
+    if (size_ == 0U) {
         return false;
     }
-    event = std::move(queue_.front());
-    queue_.pop_front();
+    pop_front_locked(event);
     return true;
+}
+
+void BoundedMailbox::pop_front_locked(EventEnvelope& event) {
+    // Moving out leaves the slot's payload pointer empty, so the ring never pins events.
+    event = std::move(slots_[head_]);
+    if (++head_ == slots_.size()) {
+        head_ = 0;
+    }
+    --size_;
 }
 
 void BoundedMailbox::close() {
@@ -63,47 +90,38 @@ void BoundedMailbox::close() {
     available_.notify_all();
 }
 
-bool BoundedMailbox::closed() const {
-    std::lock_guard lock(mutex_);
-    return closed_;
-}
-
 std::size_t BoundedMailbox::size() const {
     std::lock_guard lock(mutex_);
-    return queue_.size();
+    return size_;
 }
 
-std::size_t BoundedMailbox::capacity() const noexcept {
-    return capacity_;
+MailboxStats BoundedMailbox::stats() const {
+    std::lock_guard lock(mutex_);
+    return MailboxStats{
+        size_,
+        slots_.size(),
+        max_depth_,
+        accepted_,
+        rejected_full_,
+        evicted_oldest_,
+        rejected_closed_,
+    };
 }
 
-std::size_t BoundedMailbox::max_depth() const noexcept {
-    return max_depth_.load(std::memory_order_relaxed);
-}
-
-std::uint64_t BoundedMailbox::rejected_full() const noexcept {
-    return rejected_full_.load(std::memory_order_relaxed);
-}
-
-EventBus::Subscription::Subscription(EventBus* bus,
-                                     std::type_index type,
-                                     std::uint64_t id)
-    : bus_(bus), type_(type), id_(id) {}
+EventBus::Subscription::Subscription(EventBus* bus, std::uint64_t id) noexcept
+    : bus_(bus), id_(id) {}
 
 EventBus::Subscription::~Subscription() {
     reset();
 }
 
 EventBus::Subscription::Subscription(Subscription&& other) noexcept
-    : bus_(std::exchange(other.bus_, nullptr)),
-      type_(other.type_),
-      id_(std::exchange(other.id_, 0)) {}
+    : bus_(std::exchange(other.bus_, nullptr)), id_(std::exchange(other.id_, 0)) {}
 
 EventBus::Subscription& EventBus::Subscription::operator=(Subscription&& other) noexcept {
     if (this != &other) {
         reset();
         bus_ = std::exchange(other.bus_, nullptr);
-        type_ = other.type_;
         id_ = std::exchange(other.id_, 0);
     }
     return *this;
@@ -111,59 +129,111 @@ EventBus::Subscription& EventBus::Subscription::operator=(Subscription&& other) 
 
 void EventBus::Subscription::reset() {
     if (bus_ != nullptr) {
-        bus_->unsubscribe(type_, id_);
+        bus_->unsubscribe(id_);
         bus_ = nullptr;
         id_ = 0;
     }
 }
 
-EventBus::Subscription EventBus::subscribe_impl(
-    std::type_index type,
-    const std::shared_ptr<IEventSink>& sink) {
+Topic EventBus::topic(std::string_view name) {
+    if (name.empty()) {
+        throw std::invalid_argument("topic name must not be empty");
+    }
+    std::unique_lock lock(mutex_);
+    const auto found = topic_ids_.find(std::string(name));
+    if (found != topic_ids_.end()) {
+        return found->second;
+    }
+    topic_names_.emplace_back(name);
+    const Topic registered{static_cast<std::uint32_t>(topic_names_.size())};
+    topic_ids_.emplace(std::string(name), registered);
+    return registered;
+}
+
+std::string EventBus::topic_name(Topic topic) const {
+    if (topic.id == 0U) {
+        return {};
+    }
+    std::shared_lock lock(mutex_);
+    return topic.id <= topic_names_.size() ? topic_names_[topic.id - 1U] : std::string{};
+}
+
+EventBus::Subscription EventBus::subscribe_impl(std::type_index type,
+                                                std::string_view type_name,
+                                                std::optional<Topic> topic,
+                                                std::shared_ptr<IEventSink> sink,
+                                                std::string subscriber) {
     if (!sink) {
         throw std::invalid_argument("event sink must not be null");
     }
-    const auto id = next_subscription_id_.fetch_add(1, std::memory_order_relaxed);
-    {
-        std::unique_lock lock(subscriptions_mutex_);
-        subscriptions_[type].push_back(Subscriber{id, sink});
+    std::unique_lock lock(mutex_);
+    if (topic && (topic->id == 0U || topic->id > topic_names_.size())) {
+        throw std::invalid_argument("subscriptions must name a registered topic");
     }
-    return Subscription(this, type, id);
+    const auto id = next_subscription_id_++;
+    records_.push_back(SubscriberRecord{
+        id, type, type_name, topic, std::move(sink), std::move(subscriber)});
+    rebuild_routes_locked(type);
+    return Subscription(this, id);
+}
+
+void EventBus::unsubscribe(std::uint64_t id) {
+    std::unique_lock lock(mutex_);
+    const auto found = std::find_if(records_.begin(), records_.end(),
+                                    [id](const SubscriberRecord& record) { return record.id == id; });
+    if (found == records_.end()) {
+        return;
+    }
+    const auto type = found->type;
+    records_.erase(found);
+    rebuild_routes_locked(type);
+}
+
+void EventBus::rebuild_routes_locked(std::type_index type) {
+    std::erase_if(routes_, [type](const auto& route) { return route.first.type == type; });
+
+    SinkList every_topic;
+    for (const auto& record : records_) {
+        if (record.type == type && !record.topic) {
+            every_topic.push_back(record.sink);
+        }
+    }
+    for (const auto& record : records_) {
+        if (record.type != type || !record.topic) {
+            continue;
+        }
+        auto [route, inserted] = routes_.try_emplace(RouteKey{type, record.topic->id});
+        if (inserted) {
+            route->second = every_topic;
+        }
+        route->second.push_back(record.sink);
+    }
+    if (!every_topic.empty()) {
+        routes_.insert_or_assign(RouteKey{type, 0U}, std::move(every_topic));
+    }
 }
 
 PublishResult EventBus::publish_impl(std::type_index type,
-                                     std::shared_ptr<const Event> payload) {
-    std::vector<std::shared_ptr<IEventSink>> targets;
-    {
-        std::shared_lock lock(subscriptions_mutex_);
-        const auto found = subscriptions_.find(type);
-        if (found != subscriptions_.end()) {
-            targets.reserve(found->second.size());
-            for (const auto& subscriber : found->second) {
-                if (auto sink = subscriber.sink.lock()) {
-                    targets.push_back(std::move(sink));
-                }
-            }
-        }
-    }
-
+                                     Topic topic,
+                                     std::shared_ptr<const void> payload) {
     events_published_.fetch_add(1, std::memory_order_relaxed);
-    if (targets.empty()) {
+
+    std::shared_lock lock(mutex_);
+    auto found = routes_.find(RouteKey{type, topic.id});
+    if (found == routes_.end() && topic.id != 0U) {
+        found = routes_.find(RouteKey{type, 0U});
+    }
+    if (found == routes_.end()) {
+        lock.unlock();
         events_without_subscribers_.fetch_add(1, std::memory_order_relaxed);
         return {};
     }
 
-    const EventEnvelope envelope{
-        type,
-        next_event_sequence_.fetch_add(1, std::memory_order_relaxed),
-        MonotonicClock::now(),
-        std::move(payload),
-    };
-
+    const EventEnvelope envelope{type, topic, MonotonicClock::now(), std::move(payload)};
     PublishResult result;
-    result.subscribers = targets.size();
-    for (const auto& target : targets) {
-        switch (target->try_enqueue(envelope)) {
+    result.subscribers = found->second.size();
+    for (const auto& sink : found->second) {
+        switch (sink->try_enqueue(envelope)) {
             case EnqueueResult::accepted:
                 ++result.delivered;
                 break;
@@ -175,35 +245,30 @@ PublishResult EventBus::publish_impl(std::type_index type,
                 break;
         }
     }
-
-    subscriber_deliveries_.fetch_add(result.delivered, std::memory_order_relaxed);
-    rejected_full_.fetch_add(result.rejected_full, std::memory_order_relaxed);
-    rejected_closed_.fetch_add(result.rejected_closed, std::memory_order_relaxed);
     return result;
 }
 
-void EventBus::unsubscribe(std::type_index type, std::uint64_t id) {
-    std::unique_lock lock(subscriptions_mutex_);
-    const auto found = subscriptions_.find(type);
-    if (found == subscriptions_.end()) {
-        return;
+std::vector<RouteInfo> EventBus::routes() const {
+    std::shared_lock lock(mutex_);
+    std::vector<RouteInfo> routes;
+    routes.reserve(records_.size());
+    for (const auto& record : records_) {
+        routes.push_back(RouteInfo{
+            std::string(record.type_name),
+            record.topic ? topic_names_[record.topic->id - 1U] : std::string("*"),
+            record.name,
+        });
     }
-    auto& subscribers = found->second;
-    std::erase_if(subscribers, [id](const Subscriber& subscriber) {
-        return subscriber.id == id || subscriber.sink.expired();
-    });
-    if (subscribers.empty()) {
-        subscriptions_.erase(found);
-    }
+    return routes;
 }
 
-EventBusStats EventBus::stats() const noexcept {
+EventBusStats EventBus::stats() const {
+    std::shared_lock lock(mutex_);
     return EventBusStats{
         events_published_.load(std::memory_order_relaxed),
-        subscriber_deliveries_.load(std::memory_order_relaxed),
-        rejected_full_.load(std::memory_order_relaxed),
-        rejected_closed_.load(std::memory_order_relaxed),
         events_without_subscribers_.load(std::memory_order_relaxed),
+        records_.size(),
+        topic_names_.size(),
     };
 }
 

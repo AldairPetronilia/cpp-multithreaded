@@ -1,0 +1,1536 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pipeline Monitor</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --wash: rgba(11, 11, 11, 0.04);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #4a3aa7; --s8: #e34948;
+  --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+  --up: #006300; --down: #d03b3b;
+  --accent: #2a78d6;
+  --accent-wash: rgba(42, 120, 214, 0.10);
+  --track: #cde2fb;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.05);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+    --up: #0ca30c; --accent: #3987e5; --accent-wash: rgba(57, 135, 229, 0.14); --track: #0d366b;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.05);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  --up: #0ca30c; --accent: #3987e5; --accent-wash: rgba(57, 135, 229, 0.14); --track: #0d366b;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 var(--font); }
+body { padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) 32px max(16px, env(safe-area-inset-left)); }
+main { max-width: 1480px; margin: 0 auto; display: grid; gap: 16px; }
+h1 { font-size: 20px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 14px; font-weight: 650; margin: 0; }
+button, select, input { font: inherit; color: inherit; }
+[hidden] { display: none !important; }
+.muted { color: var(--muted); }
+.secondary { color: var(--ink-2); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* Header */
+.top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+.top .title { flex: 1 1 420px; min-width: 0; }
+.top .title p { margin: 2px 0 0; color: var(--ink-2); max-width: 900px; }
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+  background: var(--surface); box-shadow: 0 0 0 1px var(--border); white-space: nowrap; }
+.pill .icon { font-size: 12px; line-height: 1; }
+.ghost { background: transparent; border: 0; box-shadow: 0 0 0 1px var(--border); border-radius: 8px;
+  padding: 5px 10px; cursor: pointer; }
+.ghost:hover { background: var(--wash); }
+.ghost[aria-pressed="true"] { box-shadow: 0 0 0 1.5px var(--ink-2); font-weight: 600; }
+
+/* Cards */
+.card { background: var(--surface); border-radius: 12px; box-shadow: 0 0 0 1px var(--border); padding: 14px 16px 16px; min-width: 0; }
+.card > header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 10px; }
+.card > header .spacer { flex: 1; }
+.card > header small { color: var(--muted); font-size: 12px; }
+.grid-2 { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.stack { display: grid; gap: 16px; min-width: 0; }
+@media (max-width: 1100px) { .grid-2 { grid-template-columns: minmax(0, 1fr); } }
+
+/* Controls: one row above everything they affect */
+.controls { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px; }
+.control { background: var(--surface); box-shadow: 0 0 0 1px var(--border); border-radius: 10px;
+  padding: 8px 12px; display: grid; gap: 4px; min-width: 180px; flex: 1 1 200px; }
+.control label, .control .label { font-size: 12px; color: var(--ink-2); display: flex; justify-content: space-between; gap: 8px; }
+.control output { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.control .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.control input[type="range"] { width: 100%; accent-color: var(--accent); }
+.control select { background: var(--surface); border: 0; box-shadow: 0 0 0 1px var(--border); border-radius: 6px; padding: 3px 6px; }
+.control.actions { flex: 0 0 auto; min-width: 0; align-content: center; }
+
+/* KPI tiles */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.tile { background: var(--surface); border-radius: 12px; box-shadow: 0 0 0 1px var(--border); padding: 12px 14px; display: grid; gap: 2px; min-width: 0; }
+.tile .label { color: var(--ink-2); font-size: 12px; }
+.tile .value { font-size: 26px; font-weight: 650; letter-spacing: -0.01em; line-height: 1.15; }
+.tile .sub { color: var(--muted); font-size: 12px; min-height: 17px; }
+.tile svg { width: 100%; height: 32px; display: block; margin-top: 4px; }
+
+/* Pipeline diagram */
+.diagram-wrap { position: relative; overflow-x: auto; }
+.diagram-inner { position: relative; min-width: 980px; }
+#diagram { display: block; width: 100%; height: auto; }
+#particles { position: absolute; inset: 0; pointer-events: none; }
+#diagram text { fill: var(--ink); font-family: var(--font); }
+#diagram .node-box { fill: var(--surface); stroke: var(--axis); stroke-width: 1; }
+#diagram .bus-box { fill: var(--wash); stroke: var(--axis); stroke-width: 1; }
+#diagram .title { font-size: 13px; font-weight: 650; }
+#diagram .small { font-size: 11px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
+#diagram .tiny { font-size: 10px; fill: var(--muted); letter-spacing: 0.02em; }
+#diagram .edge { fill: none; stroke: var(--axis); stroke-width: 1.5; }
+#diagram .track { fill: var(--track); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; font-size: 12px; color: var(--ink-2); }
+.legend .key { display: inline-flex; align-items: center; gap: 6px; }
+.legend svg { overflow: visible; }
+
+/* Price small multiples */
+.multiples { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px 18px; }
+.chart { min-width: 0; }
+.chart .chart-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+.chart .chart-head .last { margin-left: auto; font-weight: 600; font-variant-numeric: tabular-nums; }
+.chart svg { display: block; width: 100%; overflow: visible; touch-action: none; }
+.chart svg text, .spark text, .limiter-chart text { fill: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.gridline { stroke: var(--grid); stroke-width: 1; }
+.baseline { stroke: var(--axis); stroke-width: 1; }
+.price-line { fill: none; stroke: var(--ink-2); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.crosshair { stroke: var(--muted); stroke-width: 1; }
+
+/* Rate limiter */
+.meter { height: 10px; border-radius: 5px; background: var(--track); overflow: hidden; }
+.meter > div { height: 100%; border-radius: 5px; background: var(--accent); transition: width 180ms linear, background-color 180ms; }
+.limiter-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+.limiter-head strong { font-size: 22px; font-weight: 650; }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px 12px; margin: 12px 0 8px; }
+.stat .k { color: var(--muted); font-size: 11px; }
+.stat .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+.notice { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--ink-2); min-height: 18px; }
+
+/* Tables */
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+td { padding: 5px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.r, th.r { text-align: right; }
+td .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+td svg.spark { width: 110px; height: 22px; display: block; }
+.up { color: var(--up); }
+.down { color: var(--down); }
+.status-icon { font-size: 12px; }
+
+/* Tooltip */
+#tooltip { position: fixed; z-index: 10; pointer-events: none; background: var(--surface); color: var(--ink);
+  box-shadow: 0 0 0 1px var(--border), 0 6px 20px rgba(0, 0, 0, 0.14); border-radius: 8px; padding: 8px 10px;
+  font-size: 12px; max-width: 280px; }
+#tooltip .tv { font-weight: 650; font-size: 13px; font-variant-numeric: tabular-nums; }
+#tooltip .tl { color: var(--ink-2); }
+#tooltip .row { display: flex; align-items: center; gap: 6px; }
+
+footer { color: var(--muted); font-size: 12px; max-width: 1000px; }
+footer p { margin: 4px 0; }
+@media (prefers-reduced-motion: reduce) { .meter > div { transition: none; } }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div class="title">
+      <h1>Trading pipeline, live</h1>
+      <p>Feed threads publish each instrument on its own topic. Every strategy runs on its own thread
+        with its own bounded mailbox, subscribed only to its topics, and every order goes through one
+        shared, rate-limited API gateway.</p>
+    </div>
+    <span class="pill" id="connection" role="status"><span class="icon" aria-hidden="true">&#9679;</span><span>Connecting</span></span>
+    <span class="pill num" id="uptime">uptime &mdash;</span>
+    <button class="ghost" id="theme" type="button">Theme: auto</button>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <div class="control">
+      <label for="feed-rate">Feed rate (rounds/s per feed) <output id="feed-rate-out">&mdash;</output></label>
+      <input id="feed-rate" type="range" min="0" max="9" step="1" value="4">
+      <div class="row" id="feed-pauses" aria-label="Pause feeds"></div>
+    </div>
+    <div class="control">
+      <label for="work-target">Slow a strategy down <output id="work-out">&mdash;</output></label>
+      <div class="row"><select id="work-target" aria-label="Strategy to slow down"></select></div>
+      <input id="work" type="range" min="0" max="7" step="1" value="0" aria-label="Simulated work per event">
+    </div>
+    <div class="control">
+      <label for="latency">Broker latency <output id="latency-out">&mdash;</output></label>
+      <input id="latency" type="range" min="0" max="9" step="1" value="3">
+      <label for="inject">Inject HTTP 429
+        <select id="inject">
+          <option value="0">off</option>
+          <option value="20">every 20th call</option>
+          <option value="10">every 10th call</option>
+          <option value="5">every 5th call</option>
+          <option value="2">every 2nd call</option>
+        </select>
+      </label>
+    </div>
+    <div class="control actions">
+      <button class="ghost" id="reset" type="button">Reset controls</button>
+      <span class="muted" id="control-error" role="alert"></span>
+    </div>
+  </section>
+
+  <section class="kpis" aria-label="Headline figures" id="kpis"></section>
+
+  <section class="card" aria-labelledby="pipeline-title">
+    <header>
+      <h2 id="pipeline-title">Pipeline</h2>
+      <small>moving dots show traffic; each strategy and worker shows its own mailbox fill</small>
+      <span class="spacer"></span>
+      <div class="legend" id="strategy-legend"></div>
+      <button class="ghost" id="pipeline-table-toggle" type="button" aria-pressed="false">Table</button>
+    </header>
+    <div class="diagram-wrap" id="diagram-view">
+      <div class="diagram-inner">
+        <svg id="diagram" role="img" aria-label="Pipeline diagram: feeds, topics, strategies, execution, API gateway and broker"></svg>
+        <canvas id="particles" aria-hidden="true"></canvas>
+      </div>
+    </div>
+    <div class="table-wrap" id="pipeline-table" hidden></div>
+  </section>
+
+  <div class="grid-2">
+    <section class="card" aria-labelledby="prices-title">
+      <header>
+        <h2 id="prices-title">Prices and signals</h2>
+        <small>last 20 s; markers are the signals each strategy published</small>
+        <span class="spacer"></span>
+        <button class="ghost" id="prices-table-toggle" type="button" aria-pressed="false">Table</button>
+      </header>
+      <div class="legend" id="price-legend" style="margin-bottom: 10px"></div>
+      <div class="multiples" id="prices"></div>
+      <div class="table-wrap" id="prices-table" hidden></div>
+    </section>
+    <div class="stack">
+      <section class="card" aria-labelledby="limiter-title">
+        <header><h2 id="limiter-title">Shared API gateway</h2><small>one token, one sliding-window limit for every strategy</small></header>
+        <div id="limiter"></div>
+      </section>
+      <section class="card" aria-labelledby="latency-title">
+        <header><h2 id="latency-title">Latency by stage</h2><small>last interval; trend is p99</small></header>
+        <div class="table-wrap" id="latency-table"></div>
+      </section>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <section class="card" aria-labelledby="tape-title">
+      <header><h2 id="tape-title">Tape</h2><small>newest first: signals, fills and rejections</small></header>
+      <div class="table-wrap" id="tape"></div>
+    </section>
+    <section class="card" aria-labelledby="positions-title">
+      <header><h2 id="positions-title">Positions</h2><small>per strategy; P&amp;L marked to the last price</small></header>
+      <div class="table-wrap" id="positions"></div>
+    </section>
+  </div>
+
+  <footer>
+    <p>Try it: slow one strategy to 2 ms per event and watch only its mailbox fill and shed stale quotes while the
+      others stay at zero; push the feed rate to max; raise broker latency or inject 429s and watch orders queue at
+      the shared gateway instead of blocking any strategy.</p>
+    <p>Latency percentiles come from fixed-size histograms (within ~3%). Data streams from this process over
+      Server-Sent Events; nothing leaves your machine.</p>
+  </footer>
+</main>
+<div id="tooltip" role="tooltip" hidden></div>
+<script>
+'use strict';
+
+// ---------------------------------------------------------------- helpers
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const $ = (id) => document.getElementById(id);
+
+// Every label that comes from the process is set with textContent, never parsed as HTML.
+function h(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === 'class') node.className = value;
+    else if (key === 'text') node.textContent = value;
+    else if (key === 'style') node.style.cssText = value;
+    else node.setAttribute(key, value);
+  }
+  for (const child of children) if (child != null) node.append(child);
+  return node;
+}
+
+function s(tag, attrs = {}, parent = null) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === 'text') node.textContent = value;
+    else node.setAttribute(key, value);
+  }
+  if (parent) parent.append(node);
+  return node;
+}
+
+const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+const sum = (items, pick) => items.reduce((total, item) => total + pick(item), 0);
+
+const fmt = {
+  compact(value) {
+    if (!Number.isFinite(value)) return '—';
+    const magnitude = Math.abs(value);
+    if (magnitude >= 1e9) return `${(value / 1e9).toFixed(1)}B`;
+    if (magnitude >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
+    if (magnitude >= 1e4) return `${(value / 1e3).toFixed(1)}K`;
+    return Math.round(value).toLocaleString('en-US');
+  },
+  count(value) { return Number.isFinite(value) ? fmt.compact(value) : '—'; },
+  rate(value) {
+    if (!Number.isFinite(value)) return '—';
+    if (value === 0) return '0/s';
+    if (value < 10) return `${value.toFixed(1)}/s`;
+    if (value < 1000) return `${Math.round(value)}/s`;
+    return `${(value / 1000).toFixed(value < 1e4 ? 1 : 0)}k/s`;
+  },
+  latency(us) {
+    if (!Number.isFinite(us) || us <= 0) return '—';
+    if (us < 1) return '<1 µs';
+    if (us < 1000) return `${us.toFixed(us < 10 ? 1 : 0)} µs`;
+    if (us < 1e6) return `${(us / 1000).toFixed(us < 1e4 ? 2 : 1)} ms`;
+    return `${(us / 1e6).toFixed(2)} s`;
+  },
+  price(value) {
+    if (!Number.isFinite(value)) return '—';
+    return value.toFixed(value >= 100 ? 2 : value >= 10 ? 3 : 5);
+  },
+  signed(value, digits = 2) {
+    if (!Number.isFinite(value)) return '—';
+    const text = Math.abs(value).toFixed(digits);
+    return Number(text) === 0 ? text : `${value > 0 ? '+' : '−'}${text}`;
+  },
+  pct(fraction) {
+    const percent = clamp(fraction, 0, 1) * 100;
+    return `${percent > 0 && percent < 10 ? percent.toFixed(1) : Math.round(percent)}%`;
+  },
+  uptime(seconds) {
+    const whole = Math.max(0, Math.floor(seconds));
+    const minutes = Math.floor(whole / 60);
+    return `${minutes}:${String(whole % 60).padStart(2, '0')}`;
+  },
+  micros(us) { return us === 0 ? 'off' : us < 1000 ? `${us} µs/event` : `${us / 1000} ms/event`; },
+};
+
+// ---------------------------------------------------------------- palette
+// Strategy identity uses the categorical slots in configuration order and never cycles:
+// a ninth strategy falls back to the muted "other" ink.
+const SERIES = ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6', '--s7', '--s8'];
+let palette = {};
+
+function refreshPalette() {
+  const style = getComputedStyle(document.documentElement);
+  const read = (name) => style.getPropertyValue(name).trim();
+  palette = { surface: read('--surface'), muted: read('--muted'), ink2: read('--ink-2'),
+    critical: read('--critical'), axis: read('--axis') };
+  for (const slot of SERIES) palette[slot] = read(slot);
+}
+
+function colorVar(strategy) { return state.colors.get(strategy) ?? '--muted'; }
+function colorValue(strategy) { return palette[colorVar(strategy)] ?? palette.muted; }
+
+// ---------------------------------------------------------------- state
+const HISTORY = 150;  // snapshots kept for trend lines, ~30 s at the default 200 ms interval
+const state = {
+  latest: null,
+  history: [],
+  colors: new Map(),
+  initial: null,
+  connection: 'connecting',
+  seenTape: new Set(),
+  tapeSeeded: false,
+  renderQueued: false,
+};
+
+function onSnapshot(data) {
+  state.latest = data;
+  if (!state.initial && data.feeds.length) {
+    state.initial = {
+      interval: data.feeds[0].interval_us,
+      latency: data.api.mock_latency_ms,
+      inject: data.api.mock_429_every,
+    };
+  }
+  data.strategies.forEach((strategy) => {
+    if (!state.colors.has(strategy.name)) {
+      state.colors.set(strategy.name, state.colors.size < SERIES.length ? SERIES[state.colors.size] : '--muted');
+    }
+  });
+
+  const latency = {};
+  for (const [key, , pick] of latencyStages(data)) latency[key] = pick(data).recent;
+  const point = {
+    t: data.uptime_s,
+    bus: data.bus.rate,
+    pending: data.api.pending,
+    e2e: data.position_monitor.end_to_end.recent.count ? data.position_monitor.end_to_end.recent.p99 : null,
+    latency,
+    signalsTotal: sum(data.strategies, (strategy) => strategy.signals),
+    fillsTotal: data.position_monitor.fills,
+    acceptedTotal: data.api.accepted,
+  };
+  // Signals, fills and orders arrive a few per second, so per-interval rates flicker
+  // between zero and a spike; a rolling window reads better.
+  point.signals = rollingRate(point, 'signalsTotal');
+  point.fills = rollingRate(point, 'fillsTotal');
+  point.requests = rollingRate(point, 'acceptedTotal');
+  state.history.push(point);
+  if (state.history.length > HISTORY) state.history.shift();
+
+  pipeline.onSnapshot(data);
+  if (!state.renderQueued) {
+    state.renderQueued = true;
+    requestAnimationFrame(() => { state.renderQueued = false; render(); });
+  }
+}
+
+const ROLLING_S = 3;
+
+function rollingRate(point, field) {
+  const start = state.history.find((earlier) => earlier.t >= point.t - ROLLING_S);
+  if (!start || point.t - start.t < 0.5) return 0;
+  return Math.max(0, point[field] - start[field]) / (point.t - start.t);
+}
+
+const lastPoint = () => state.history[state.history.length - 1] ?? {};
+
+function render() {
+  const data = state.latest;
+  if (!data) return;
+  setConnection(state.connection === 'reconnecting' ? 'reconnecting' : data.running ? 'live' : 'stopped');
+  $('uptime').textContent = `uptime ${fmt.uptime(data.uptime_s)}`;
+  renderLegends(data);
+  renderKpis(data);
+  syncControls(data);
+  pipeline.update(data);
+  renderPrices(data);
+  renderLimiter(data);
+  renderLatency(data);
+  renderTape(data);
+  renderPositions(data);
+  if (!$('pipeline-table').hidden) renderPipelineTable(data);
+  if (!$('prices-table').hidden) renderPricesTable(data);
+}
+
+// ---------------------------------------------------------------- connection
+const CONNECTION = {
+  connecting: { icon: '○', color: 'var(--muted)', label: 'Connecting' },
+  live: { icon: '●', color: 'var(--good)', label: 'Live' },
+  reconnecting: { icon: '⚠︎', color: 'var(--warning)', label: 'Reconnecting' },
+  stopped: { icon: '■', color: 'var(--muted)', label: 'Run complete' },
+};
+
+function setConnection(kind) {
+  const pill = $('connection');
+  if (pill.dataset.kind === kind) return;
+  pill.dataset.kind = kind;
+  const spec = CONNECTION[kind];
+  pill.replaceChildren(h('span', { class: 'icon', 'aria-hidden': 'true', style: `color:${spec.color}`, text: spec.icon }),
+    h('span', { text: spec.label }));
+}
+
+function connect() {
+  const source = new EventSource('/events');
+  source.onopen = () => { state.connection = 'live'; setConnection('live'); };
+  source.onmessage = (event) => {
+    state.connection = 'live';
+    try { onSnapshot(JSON.parse(event.data)); } catch (error) { console.error('bad snapshot', error); }
+  };
+  source.onerror = () => {
+    state.connection = 'reconnecting';
+    setConnection(state.latest && !state.latest.running ? 'stopped' : 'reconnecting');
+  };
+}
+
+// ---------------------------------------------------------------- tooltip
+const tooltip = $('tooltip');
+
+function tipRow(value, label, color = null, shape = 'line') {
+  const row = h('div', { class: 'row' });
+  if (color) {
+    const key = s('svg', { width: 14, height: 10, 'aria-hidden': 'true' });
+    if (shape === 'line') s('line', { x1: 1, y1: 5, x2: 13, y2: 5, stroke: color, 'stroke-width': 2, 'stroke-linecap': 'round' }, key);
+    else s('path', { d: markerPath(7, 5, shape === 'buy' ? 1 : -1, 4.5), fill: color }, key);
+    row.append(key);
+  }
+  row.append(h('span', { class: 'tv', text: value }), h('span', { class: 'tl', text: label }));
+  return row;
+}
+
+function showTooltip(clientX, clientY, rows) {
+  tooltip.replaceChildren(...rows);
+  tooltip.hidden = false;
+  const width = tooltip.offsetWidth;
+  const height = tooltip.offsetHeight;
+  const left = clientX + 14 + width > window.innerWidth - 8 ? clientX - 14 - width : clientX + 14;
+  const top = clamp(clientY - height / 2, 8, window.innerHeight - height - 8);
+  tooltip.style.left = `${Math.max(8, left)}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function hideTooltip() { tooltip.hidden = true; }
+
+// Triangle marker: up for buys, down for sells, so side never relies on colour.
+function markerPath(x, y, direction, size) {
+  return direction > 0
+    ? `M${x},${y - size} L${x + size},${y + size * 0.8} L${x - size},${y + size * 0.8} Z`
+    : `M${x},${y + size} L${x + size},${y - size * 0.8} L${x - size},${y - size * 0.8} Z`;
+}
+
+// ---------------------------------------------------------------- legends
+function renderLegends(data) {
+  const key = data.strategies.map((strategy) => strategy.name).join('|');
+  if (renderLegends.key === key) return;
+  renderLegends.key = key;
+  for (const id of ['strategy-legend', 'price-legend']) {
+    const legend = $(id);
+    legend.replaceChildren();
+    for (const strategy of data.strategies) {
+      const swatch = s('svg', { width: 10, height: 10, 'aria-hidden': 'true' });
+      s('circle', { cx: 5, cy: 5, r: 4.5, style: `fill:var(${colorVar(strategy.name)})` }, swatch);
+      legend.append(h('span', { class: 'key' }, swatch, h('span', { text: `${strategy.name} · ${strategy.kind}` })));
+    }
+    if (id === 'price-legend') {
+      for (const [direction, label] of [[1, 'buy'], [-1, 'sell']]) {
+        const glyph = s('svg', { width: 12, height: 12, 'aria-hidden': 'true' });
+        s('path', { d: markerPath(6, 6, direction, 4.5), style: 'fill:var(--ink-2)' }, glyph);
+        legend.append(h('span', { class: 'key' }, glyph, h('span', { text: label })));
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------- sparklines
+function sparkline(svg, values, { zeroBased = true } = {}) {
+  const width = svg.clientWidth || 110;
+  const height = svg.clientHeight || 22;
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.replaceChildren();
+  const points = values.map((value, index) => [index, value]).filter(([, value]) => Number.isFinite(value));
+  if (points.length < 2) return;
+  const max = Math.max(...points.map(([, value]) => value));
+  const min = zeroBased ? 0 : Math.min(...points.map(([, value]) => value));
+  const span = max - min || 1;
+  const x = (index) => 2 + (index / Math.max(1, values.length - 1)) * (width - 6);
+  const y = (value) => height - 3 - ((value - min) / span) * (height - 6);
+  s('path', {
+    d: points.map(([index, value], order) => `${order ? 'L' : 'M'}${x(index).toFixed(1)},${y(value).toFixed(1)}`).join(''),
+    fill: 'none', style: 'stroke:var(--muted)', 'stroke-width': 1.5, 'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+  }, svg);
+  const [lastIndex, lastValue] = points[points.length - 1];
+  s('circle', { cx: x(lastIndex), cy: y(lastValue), r: 3, style: 'fill:var(--accent);stroke:var(--surface)', 'stroke-width': 1.5 }, svg);
+}
+
+// ---------------------------------------------------------------- KPI tiles
+const KPIS = [
+  { id: 'bus', label: 'Events through the bus',
+    value: (d) => fmt.rate(d.bus.rate), sub: (d) => `${fmt.count(d.bus.published)} published`, series: (p) => p.bus },
+  { id: 'signals', label: 'Strategy signals',
+    value: (d) => fmt.count(sum(d.strategies, (x) => x.signals)),
+    sub: () => `${fmt.rate(lastPoint().signals)} over the last ${ROLLING_S} s`, series: (p) => p.signals },
+  { id: 'pending', label: 'Orders waiting at the gateway',
+    value: (d) => fmt.count(d.api.pending),
+    sub: (d) => `${d.api.active} in flight · limit ${d.api.window_limit} per ${d.api.window_ms} ms`, series: (p) => p.pending },
+  { id: 'fills', label: 'Fills',
+    value: (d) => fmt.count(d.position_monitor.fills),
+    sub: (d) => `${fmt.count(d.position_monitor.rejections)} rejected · ${fmt.count(d.api.retries)} retries`, series: (p) => p.fills },
+  { id: 'e2e', label: 'Market data → position, p99',
+    value: (d) => fmt.latency(latest(d.position_monitor.end_to_end).p99),
+    sub: (d) => `p50 ${fmt.latency(latest(d.position_monitor.end_to_end).p50)} · includes gateway queueing`, series: (p) => p.e2e },
+];
+
+// The most recent interval when it has samples, otherwise the cumulative figure.
+function latest(latency) { return latency.recent.count ? latency.recent : latency.all; }
+
+function renderKpis(data) {
+  const container = $('kpis');
+  if (!container.children.length) {
+    for (const kpi of KPIS) {
+      container.append(h('div', { class: 'tile', id: `kpi-${kpi.id}` },
+        h('span', { class: 'label', text: kpi.label }), h('span', { class: 'value', text: '—' }),
+        h('span', { class: 'sub' }), s('svg', { 'aria-hidden': 'true' })));
+    }
+  }
+  for (const kpi of KPIS) {
+    const tile = $(`kpi-${kpi.id}`);
+    tile.querySelector('.value').textContent = kpi.value(data);
+    tile.querySelector('.sub').textContent = kpi.sub(data);
+    sparkline(tile.querySelector('svg'), state.history.map(kpi.series));
+  }
+}
+
+// ---------------------------------------------------------------- controls
+const FEED_STEPS = [20000, 10000, 5000, 2000, 1000, 500, 200, 100, 50, 0];  // µs between rounds
+const WORK_STEPS = [0, 50, 100, 200, 500, 1000, 2000, 5000];               // µs per event
+const LATENCY_STEPS = [0, 1, 2, 5, 10, 20, 50, 100, 200, 500];             // ms
+const touched = new Map();  // control id -> time of the user's last change
+
+const nearestIndex = (steps, value) =>
+  steps.reduce((best, step, index) => (Math.abs(step - value) < Math.abs(steps[best] - value) ? index : best), 0);
+const recentlyTouched = (id) => performance.now() - (touched.get(id) ?? -1e9) < 1500;
+const feedRateLabel = (interval) => (interval === 0 ? 'max' : fmt.rate(1e6 / interval).replace('/s', ''));
+
+async function sendControl(name, value) {
+  try {
+    const response = await fetch(`/api/control?name=${encodeURIComponent(name)}&value=${encodeURIComponent(value)}`, { method: 'POST' });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${response.status}`);
+    }
+    $('control-error').textContent = '';
+  } catch (error) {
+    $('control-error').textContent = `Control failed: ${error.message}`;
+  }
+}
+
+// Sends at most every 150 ms while a slider moves, always including the final value.
+function throttled(send) {
+  let timer = null;
+  let pending = null;
+  return (...args) => {
+    pending = args;
+    if (timer) return;
+    send(...pending);
+    pending = null;
+    timer = setTimeout(function flush() {
+      timer = null;
+      if (pending) { send(...pending); pending = null; timer = setTimeout(flush, 150); }
+    }, 150);
+  };
+}
+
+function setupControls() {
+  const feedRate = $('feed-rate');
+  const sendFeed = throttled((interval) => sendControl('feed.interval_us:*', interval));
+  feedRate.addEventListener('input', () => {
+    touched.set('feed-rate', performance.now());
+    const interval = FEED_STEPS[Number(feedRate.value)];
+    $('feed-rate-out').textContent = feedRateLabel(interval);
+    sendFeed(interval);
+  });
+
+  const work = $('work');
+  const sendWork = throttled((target, value) => sendControl(`strategy.work_us:${target}`, value));
+  work.addEventListener('input', () => {
+    touched.set('work', performance.now());
+    const value = WORK_STEPS[Number(work.value)];
+    $('work-out').textContent = fmt.micros(value);
+    sendWork($('work-target').value, value);
+  });
+  $('work-target').addEventListener('change', () => { touched.delete('work'); syncControls(state.latest); });
+
+  const latency = $('latency');
+  const sendLatency = throttled((value) => sendControl('api.latency_ms', value));
+  latency.addEventListener('input', () => {
+    touched.set('latency', performance.now());
+    const value = LATENCY_STEPS[Number(latency.value)];
+    $('latency-out').textContent = `${value} ms`;
+    sendLatency(value);
+  });
+
+  $('inject').addEventListener('change', (event) => {
+    touched.set('inject', performance.now());
+    sendControl('api.inject_429_every', event.target.value);
+  });
+
+  $('reset').addEventListener('click', async () => {
+    if (!state.initial) return;
+    touched.clear();
+    await Promise.all([
+      sendControl('feed.interval_us:*', state.initial.interval),
+      sendControl('feed.paused:*', 0),
+      sendControl('strategy.work_us:*', 0),
+      sendControl('api.latency_ms', state.initial.latency),
+      sendControl('api.inject_429_every', state.initial.inject),
+    ]);
+  });
+}
+
+// Reflects the process's actual settings, except while the user is adjusting a control.
+function syncControls(data) {
+  if (!data) return;
+  if (data.feeds.length && !recentlyTouched('feed-rate')) {
+    const interval = data.feeds[0].interval_us;
+    $('feed-rate').value = nearestIndex(FEED_STEPS, interval);
+    $('feed-rate-out').textContent = feedRateLabel(interval);
+  }
+
+  const pauses = $('feed-pauses');
+  if (pauses.children.length !== data.feeds.length) {
+    pauses.replaceChildren(...data.feeds.map((feed) => {
+      const button = h('button', { class: 'ghost', type: 'button', 'data-feed': feed.name, 'aria-pressed': 'false' });
+      button.addEventListener('click', () => {
+        const paused = button.getAttribute('aria-pressed') !== 'true';
+        button.setAttribute('aria-pressed', String(paused));
+        touched.set(`pause-${feed.name}`, performance.now());
+        sendControl(`feed.paused:${feed.name}`, paused ? 1 : 0);
+      });
+      return button;
+    }));
+  }
+  for (const feed of data.feeds) {
+    const button = pauses.querySelector(`[data-feed="${CSS.escape(feed.name)}"]`);
+    if (!button || recentlyTouched(`pause-${feed.name}`)) continue;
+    button.setAttribute('aria-pressed', String(feed.paused));
+    button.textContent = `${feed.paused ? '▶ resume' : '⏸ pause'} ${feed.name}`;
+  }
+
+  const target = $('work-target');
+  if (target.options.length !== data.strategies.length) {
+    target.replaceChildren(...data.strategies.map((strategy) => h('option', { value: strategy.name, text: strategy.name })));
+  }
+  const selected = data.strategies.find((strategy) => strategy.name === target.value);
+  if (selected && !recentlyTouched('work')) {
+    $('work').value = nearestIndex(WORK_STEPS, selected.work_us);
+    $('work-out').textContent = fmt.micros(selected.work_us);
+  }
+
+  if (!recentlyTouched('latency')) {
+    $('latency').value = nearestIndex(LATENCY_STEPS, data.api.mock_latency_ms);
+    $('latency-out').textContent = `${data.api.mock_latency_ms} ms`;
+  }
+  const inject = $('inject');
+  if (!recentlyTouched('inject')) {
+    const value = String(data.api.mock_429_every);
+    if (![...inject.options].some((option) => option.value === value)) {
+      inject.append(h('option', { value, text: `every ${value}th call` }));
+    }
+    inject.value = value;
+  }
+}
+
+// ---------------------------------------------------------------- theme
+const THEMES = ['auto', 'light', 'dark'];
+
+function applyTheme(theme) {
+  if (theme === 'auto') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  $('theme').textContent = `Theme: ${theme}`;
+  try { localStorage.setItem('pipeline-theme', theme); } catch (error) { /* storage may be unavailable */ }
+  refreshPalette();
+  if (state.latest) render();
+}
+
+function setupTheme() {
+  let saved = 'auto';
+  try { saved = localStorage.getItem('pipeline-theme') || 'auto'; } catch (error) { /* ignore */ }
+  applyTheme(THEMES.includes(saved) ? saved : 'auto');
+  $('theme').addEventListener('click', () => {
+    const current = document.documentElement.dataset.theme || 'auto';
+    applyTheme(THEMES[(THEMES.indexOf(current) + 1) % THEMES.length]);
+  });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { refreshPalette(); if (state.latest) render(); });
+}
+
+// ---------------------------------------------------------------- pipeline diagram
+const STATUS = {
+  normal: { color: 'var(--accent)', icon: '', label: '' },
+  warning: { color: 'var(--warning)', icon: '⚠︎', label: 'filling' },
+  critical: { color: 'var(--critical)', icon: '✕', label: 'full' },
+};
+
+// A mailbox is healthy while it drains; it turns critical once it sheds or rejects events.
+function mailboxStatus(worker) {
+  const fill = worker.capacity ? worker.depth / worker.capacity : 0;
+  if (worker.drop_rate > 0 || fill >= 0.9) return 'critical';
+  if (fill >= 0.5) return 'warning';
+  return 'normal';
+}
+
+const pipeline = (() => {
+  const W = 1320;
+  const X = { feed: 85, topic: 322, strategy: 580, execution: 810, api: 1035, broker: 1245 };
+  const SIZE = {
+    feed: [150, 72], topic: [140, 40], strategy: [200, 106], execution: [170, 106],
+    api: [190, 134], broker: [120, 74], position: [190, 90], recorder: [190, 90],
+  };
+  const TOP = 44;
+  const svg = $('diagram');
+  const canvas = $('particles');
+  const context = canvas.getContext('2d');
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let layout = null;
+  let particles = [];
+  let lastFrame = performance.now();
+
+  const bezier = (edge, t) => {
+    const u = 1 - t;
+    const a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+    return [a * edge.p0[0] + b * edge.c1[0] + c * edge.c2[0] + d * edge.p3[0],
+      a * edge.p0[1] + b * edge.c1[1] + c * edge.c2[1] + d * edge.p3[1]];
+  };
+
+  function column(count, height, gap, available) {
+    const total = count * height + Math.max(0, count - 1) * gap;
+    const start = TOP + (available - total) / 2;
+    return Array.from({ length: count }, (_, index) => start + index * (height + gap) + height / 2);
+  }
+
+  function box(group, id, kind, cx, cy, extra = {}) {
+    const [width, height] = SIZE[kind];
+    const node = { id, kind, cx, cy, width, height, left: cx - width / 2, right: cx + width / 2,
+      top: cy - height / 2, bottom: cy + height / 2, text: {}, meters: {}, ...extra };
+    s('rect', { class: 'node-box', x: node.left, y: node.top, width, height, rx: 10 }, group);
+    return node;
+  }
+
+  function label(node, group, key, dx, dy, className, text = '', anchor = 'start') {
+    node.text[key] = s('text', { x: node.left + dx, y: node.top + dy, class: className, 'text-anchor': anchor, text }, group);
+    return node.text[key];
+  }
+
+  function meter(node, group, key, dy) {
+    const x = node.left + 12;
+    const width = node.width - 24;
+    s('rect', { class: 'track', x, y: node.top + dy, width, height: 6, rx: 3 }, group);
+    node.meters[key] = { fill: s('rect', { x, y: node.top + dy, width: 0, height: 6, rx: 3, style: 'fill:var(--accent)' }, group), width };
+  }
+
+  function setMeter(node, key, fraction, status) {
+    const target = node.meters[key];
+    target.fill.setAttribute('width', (clamp(fraction, 0, 1) * target.width).toFixed(1));
+    target.fill.style.fill = STATUS[status].color;
+  }
+
+  function edge(group, id, from, to, { color = null, bend = 0.5 } = {}) {
+    const dx = (to[0] - from[0]) * bend;
+    const vertical = Math.abs(to[0] - from[0]) < 40;
+    const e = {
+      id, p0: from, p3: to,
+      c1: vertical ? [from[0], from[1] + (to[1] - from[1]) / 2] : [from[0] + dx, from[1]],
+      c2: vertical ? [to[0], to[1] - (to[1] - from[1]) / 2] : [to[0] - dx, to[1]],
+      rate: 0, carry: 0, color,
+    };
+    s('path', {
+      class: 'edge', d: `M${e.p0} C${e.c1} ${e.c2} ${e.p3}`,
+      style: color ? `stroke:var(${color});stroke-opacity:0.45` : '',
+    }, group);
+    return e;
+  }
+
+  function build(data) {
+    svg.replaceChildren();
+    const edgesGroup = s('g', {}, svg);
+    const nodesGroup = s('g', {}, svg);
+    const nodes = new Map();
+    const edges = new Map();
+
+    const feeds = data.feeds;
+    const topics = feeds.flatMap((feed) => feed.symbols.map((symbol) => ({ symbol, feed: feed.name })));
+    const strategies = data.strategies;
+    const available = Math.max(
+      feeds.length * SIZE.feed[1] + (feeds.length - 1) * 16,
+      topics.length * SIZE.topic[1] + (topics.length - 1) * 10 + 20,
+      strategies.length * SIZE.strategy[1] + (strategies.length - 1) * 14,
+      SIZE.api[1] + 20);
+    const bandY = TOP + available + 34 + SIZE.position[1] / 2;
+    const height = bandY + SIZE.position[1] / 2 + 12;
+    svg.setAttribute('viewBox', `0 0 ${W} ${height}`);
+
+    const headings = [
+      [X.feed, 'FEEDS · one thread each'], [X.topic, 'EVENT BUS · a topic per instrument'],
+      [X.strategy, 'STRATEGIES · own thread + mailbox'], [X.execution, 'EXECUTION'],
+      [X.api, 'SHARED API GATEWAY'], [X.broker, 'BROKER'],
+    ];
+    for (const [x, text] of headings) s('text', { x, y: 18, class: 'tiny', 'text-anchor': 'middle', text }, nodesGroup);
+
+    const topicYs = column(topics.length, SIZE.topic[1], 10, available);
+    const busTop = topicYs[0] - SIZE.topic[1] / 2 - 10;
+    const busBottom = topicYs[topicYs.length - 1] + SIZE.topic[1] / 2 + 10;
+    s('rect', { class: 'bus-box', x: X.topic - 86, y: busTop, width: 172, height: busBottom - busTop, rx: 12 }, nodesGroup);
+
+    column(feeds.length, SIZE.feed[1], 16, available).forEach((cy, index) => {
+      const feed = feeds[index];
+      const node = box(nodesGroup, `feed:${feed.name}`, 'feed', X.feed, cy, { feed: feed.name });
+      label(node, nodesGroup, 'name', 12, 20, 'title', feed.name);
+      label(node, nodesGroup, 'rate', 12, 40, 'small');
+      label(node, nodesGroup, 'state', 12, 58, 'small');
+      nodes.set(node.id, node);
+    });
+
+    topics.forEach((topic, index) => {
+      const node = box(nodesGroup, `topic:${topic.symbol}`, 'topic', X.topic, topicYs[index], { feed: topic.feed, symbol: topic.symbol });
+      label(node, nodesGroup, 'name', 10, 17, 'title', topic.symbol);
+      label(node, nodesGroup, 'price', node.width - 10, 17, 'small', '', 'end');
+      label(node, nodesGroup, 'rate', 10, 32, 'tiny');
+      nodes.set(node.id, node);
+      const feedNode = nodes.get(`feed:${topic.feed}`);
+      edges.set(`feed>${topic.symbol}`, edge(edgesGroup, `feed>${topic.symbol}`, [feedNode.right, feedNode.cy], [node.left, node.cy]));
+    });
+
+    const strategyYs = column(strategies.length, SIZE.strategy[1], 14, available);
+    strategies.forEach((strategy, index) => {
+      const node = box(nodesGroup, `strategy:${strategy.name}`, 'strategy', X.strategy, strategyYs[index], { strategy: strategy.name });
+      s('circle', { cx: node.left + 17, cy: node.top + 16, r: 5, style: `fill:var(${colorVar(strategy.name)})` }, nodesGroup);
+      label(node, nodesGroup, 'name', 28, 20, 'title', strategy.name);
+      label(node, nodesGroup, 'kind', node.width - 12, 20, 'tiny', strategy.kind, 'end');
+      label(node, nodesGroup, 'mailbox', 12, 38, 'tiny');
+      meter(node, nodesGroup, 'mailbox', 44);
+      label(node, nodesGroup, 'flow', 12, 68, 'small');
+      label(node, nodesGroup, 'signals', 12, 86, 'small');
+      label(node, nodesGroup, 'status', 12, 100, 'tiny');
+      nodes.set(node.id, node);
+    });
+
+    const centre = TOP + available / 2;
+    const execution = box(nodesGroup, 'execution', 'execution', X.execution, centre);
+    label(execution, nodesGroup, 'name', 12, 20, 'title', 'Order execution');
+    label(execution, nodesGroup, 'mailbox', 12, 38, 'tiny');
+    meter(execution, nodesGroup, 'mailbox', 44);
+    label(execution, nodesGroup, 'flow', 12, 68, 'small');
+    label(execution, nodesGroup, 'orders', 12, 86, 'small');
+    nodes.set('execution', execution);
+
+    const api = box(nodesGroup, 'api', 'api', X.api, centre);
+    label(api, nodesGroup, 'name', 12, 20, 'title', 'API gateway');
+    label(api, nodesGroup, 'window', 12, 38, 'tiny');
+    meter(api, nodesGroup, 'window', 44);
+    label(api, nodesGroup, 'queue', 12, 66, 'tiny');
+    meter(api, nodesGroup, 'queue', 72);
+    label(api, nodesGroup, 'flow', 12, 96, 'small');
+    label(api, nodesGroup, 'status', 12, 114, 'small');
+    nodes.set('api', api);
+
+    const broker = box(nodesGroup, 'broker', 'broker', X.broker, centre);
+    label(broker, nodesGroup, 'name', 12, 20, 'title', 'Broker');
+    label(broker, nodesGroup, 'latency', 12, 40, 'small');
+    label(broker, nodesGroup, 'calls', 12, 58, 'small');
+    nodes.set('broker', broker);
+
+    const position = box(nodesGroup, 'position', 'position', (X.execution + X.api) / 2, bandY);
+    label(position, nodesGroup, 'name', 12, 20, 'title', 'Position monitor');
+    label(position, nodesGroup, 'mailbox', 12, 38, 'tiny');
+    meter(position, nodesGroup, 'mailbox', 44);
+    label(position, nodesGroup, 'fills', 12, 70, 'small');
+    nodes.set('position', position);
+
+    const recorder = box(nodesGroup, 'recorder', 'recorder', X.topic, bandY);
+    label(recorder, nodesGroup, 'name', 12, 20, 'title', 'Dashboard tap');
+    label(recorder, nodesGroup, 'mailbox', 12, 38, 'tiny');
+    meter(recorder, nodesGroup, 'mailbox', 44);
+    label(recorder, nodesGroup, 'flow', 12, 70, 'small');
+    nodes.set('recorder', recorder);
+
+    // Market-data routes come from the bus's own subscription table, so the diagram shows
+    // what is actually wired rather than what the configuration intended.
+    for (const strategy of strategies) {
+      const target = nodes.get(`strategy:${strategy.name}`);
+      const subscribed = data.routes.filter((route) => route.event === 'MarketData' && route.subscriber === strategy.name);
+      const symbols = subscribed.some((route) => route.topic === '*') ? topics.map((topic) => topic.symbol)
+        : subscribed.map((route) => route.topic);
+      symbols.forEach((symbol, index) => {
+        const source = nodes.get(`topic:${symbol}`);
+        if (!source) return;
+        const y = target.cy + (index - (symbols.length - 1) / 2) * 9;
+        edges.set(`${symbol}>${strategy.name}`, edge(edgesGroup, `${symbol}>${strategy.name}`,
+          [source.right, source.cy], [target.left, y], { color: colorVar(strategy.name) }));
+      });
+      const y = execution.cy + (strategies.indexOf(strategy) - (strategies.length - 1) / 2) * 10;
+      edges.set(`${strategy.name}>execution`, edge(edgesGroup, `${strategy.name}>execution`,
+        [target.right, target.cy], [execution.left, y], { color: colorVar(strategy.name) }));
+    }
+    edges.set('execution>api', edge(edgesGroup, 'execution>api', [execution.right, execution.cy], [api.left, api.cy]));
+    edges.set('api>broker', edge(edgesGroup, 'api>broker', [api.right, api.cy], [broker.left, broker.cy]));
+    edges.set('api>position', edge(edgesGroup, 'api>position', [api.cx, api.bottom], [position.right - 40, position.top]));
+    edges.set('bus>recorder', edge(edgesGroup, 'bus>recorder', [X.topic, busBottom], [recorder.cx, recorder.top]));
+
+    layout = { key: topologyKey(data), nodes, edges, width: W, height };
+    particles = [];
+  }
+
+  const topologyKey = (data) => JSON.stringify([data.feeds.map((f) => [f.name, f.symbols]),
+    data.strategies.map((x) => x.name), data.routes.length > 0]);
+
+  function update(data) {
+    if (!layout || layout.key !== topologyKey(data)) build(data);
+    const { nodes, edges } = layout;
+    const prices = new Map((data.prices || []).map((price) => [price.symbol, price]));
+
+    for (const feed of data.feeds) {
+      const node = nodes.get(`feed:${feed.name}`);
+      node.text.rate.textContent = `${fmt.rate(feed.rate)} quotes`;
+      node.text.state.textContent = feed.paused ? '⏸ paused' : feed.finished ? '■ finished' : `● ${feedRateLabel(feed.interval_us)} rounds/s`;
+      const perTopic = feed.paused ? 0 : feed.rate / Math.max(1, feed.symbols.length);
+      for (const symbol of feed.symbols) {
+        const topic = nodes.get(`topic:${symbol}`);
+        topic.text.rate.textContent = `${fmt.rate(perTopic)}`;
+        const price = prices.get(symbol);
+        topic.text.price.textContent = price ? fmt.price(price.last) : '';
+        edges.get(`feed>${symbol}`).rate = perTopic;
+        for (const [id, e] of edges) if (id.startsWith(`${symbol}>`)) e.rate = perTopic;
+      }
+    }
+
+    for (const strategy of data.strategies) {
+      const node = nodes.get(`strategy:${strategy.name}`);
+      const status = mailboxStatus(strategy);
+      node.text.mailbox.textContent = `MAILBOX ${fmt.count(strategy.depth)} / ${fmt.count(strategy.capacity)} · drop oldest`;
+      setMeter(node, 'mailbox', strategy.depth / strategy.capacity, status);
+      node.text.flow.textContent = `${fmt.rate(strategy.rate)} in · busy ${fmt.pct(strategy.utilization)}`;
+      node.text.signals.textContent = `${fmt.count(strategy.signals)} signals · ${fmt.count(strategy.evicted)} shed`;
+      node.text.status.textContent = status === 'critical' ? `✕ shedding ${fmt.rate(strategy.drop_rate)} stale quotes`
+        : status === 'warning' ? '⚠︎ mailbox filling' : strategy.work_us ? `slowed ${fmt.micros(strategy.work_us)}` : '';
+      node.text.status.style.fill = status === 'normal' ? '' : STATUS[status].color;
+    }
+
+    const execution = nodes.get('execution');
+    const exec = data.execution;
+    execution.text.mailbox.textContent = `MAILBOX ${fmt.count(exec.depth)} / ${fmt.count(exec.capacity)} · reject new`;
+    setMeter(execution, 'mailbox', exec.depth / exec.capacity, mailboxStatus(exec));
+    execution.text.flow.textContent = `${fmt.count(exec.processed)} signals · busy ${fmt.pct(exec.utilization)}`;
+    execution.text.orders.textContent = `${fmt.count(exec.submitted)} orders · ${fmt.count(exec.rejected_submissions)} refused`;
+
+    const api = nodes.get('api');
+    const gateway = data.api;
+    const windowFraction = gateway.window_used / Math.max(1, gateway.window_limit);
+    api.text.window.textContent = `WINDOW ${gateway.window_used} / ${gateway.window_limit} per ${gateway.window_ms} ms`;
+    setMeter(api, 'window', windowFraction, windowFraction >= 1 ? 'warning' : 'normal');
+    const queueFraction = gateway.outstanding / Math.max(1, gateway.capacity);
+    api.text.queue.textContent = `QUEUE ${fmt.count(gateway.pending)} waiting · ${gateway.active}/${gateway.io_threads} in flight`;
+    setMeter(api, 'queue', queueFraction, gateway.rejected_full > 0 || queueFraction >= 0.9 ? 'critical' : queueFraction >= 0.5 ? 'warning' : 'normal');
+    api.text.flow.textContent = `${fmt.count(gateway.completed)} done · ${fmt.count(gateway.retries)} retries`;
+    api.text.status.textContent = gateway.paused_ms > 0 ? `⚠︎ HTTP 429: paused ${gateway.paused_ms} ms`
+      : gateway.pending > 0 && windowFraction >= 1 ? 'rate limit reached: orders wait' : `${fmt.count(gateway.rate_limited)} × 429 seen`;
+    api.text.status.style.fill = gateway.paused_ms > 0 ? 'var(--warning)' : '';
+
+    const broker = nodes.get('broker');
+    broker.text.latency.textContent = `mock · ${gateway.mock_latency_ms} ms`;
+    broker.text.calls.textContent = `${fmt.count(gateway.mock_calls)} calls`;
+
+    const position = nodes.get('position');
+    const monitor = data.position_monitor;
+    position.text.mailbox.textContent = `MAILBOX ${fmt.count(monitor.depth)} / ${fmt.count(monitor.capacity)}`;
+    setMeter(position, 'mailbox', monitor.depth / monitor.capacity, mailboxStatus(monitor));
+    position.text.fills.textContent = `${fmt.count(monitor.fills)} fills · ${fmt.count(monitor.rejections)} rejected`;
+
+    const recorder = nodes.get('recorder');
+    if (data.recorder) {
+      const tap = data.recorder;
+      recorder.text.mailbox.textContent = `MAILBOX ${fmt.count(tap.depth)} / ${fmt.count(tap.capacity)} · every event`;
+      setMeter(recorder, 'mailbox', tap.depth / tap.capacity, mailboxStatus(tap));
+      recorder.text.flow.textContent = `${fmt.rate(tap.rate)} · ${fmt.count(tap.evicted)} shed`;
+      edges.get('bus>recorder').rate = tap.rate;
+    }
+    if (!data.running) for (const e of edges.values()) e.rate = 0;
+  }
+
+  // New tape entries become individual dots: a signal travels to the gateway, a fill
+  // makes the round trip to the broker and back to the position monitor.
+  function onSnapshot(data) {
+    const tape = data.tape || [];
+    const keys = tape.map((entry) => `${entry.t}|${entry.kind}|${entry.strategy}|${entry.symbol}|${entry.detail}`);
+    if (!state.tapeSeeded) {
+      state.tapeSeeded = true;
+      keys.forEach((key) => state.seenTape.add(key));
+      return;
+    }
+    if (!layout) return;
+    let delay = 0;
+    tape.forEach((entry, index) => {
+      if (state.seenTape.has(keys[index])) return;
+      state.seenTape.add(keys[index]);
+      const color = colorValue(entry.strategy);
+      const route = entry.kind === 'signal' ? [[`${entry.strategy}>execution`, 1], ['execution>api', 1]]
+        : entry.kind === 'fill' ? [['api>broker', 1], ['api>broker', -1], ['api>position', 1]]
+          : [['api>position', 1]];
+      if (route.every(([id]) => layout.edges.has(id))) {
+        particles.push({ route, step: 0, t: 0, delay, color, size: 4.5, cross: entry.kind === 'rejection', duration: 0.75 });
+        delay += 0.08;
+      }
+    });
+    const live = new Set(keys);
+    for (const key of state.seenTape) if (!live.has(key)) state.seenTape.delete(key);
+  }
+
+  const visualRate = (rate) => (rate > 0 ? clamp(1.2 * Math.log10(rate + 1) ** 1.5, 0.4, 14) : 0);
+
+  function advance(dt) {
+    for (const e of layout.edges.values()) {
+      if (e.id.includes('execution') || e.id.startsWith('api>')) continue;
+      e.carry += visualRate(e.rate) * dt;
+      while (e.carry >= 1 && particles.length < 900) {
+        e.carry -= 1;
+        particles.push({ route: [[e.id, 1]], step: 0, t: Math.random() * 0.05, delay: 0,
+          color: e.color ? palette[e.color] : palette.muted, size: 2.2, duration: 1.2 });
+      }
+      if (e.carry > 5) e.carry = 0;
+    }
+    particles = particles.filter((particle) => {
+      if (particle.delay > 0) { particle.delay -= dt; return true; }
+      particle.t += dt / particle.duration;
+      while (particle.t >= 1) {
+        particle.t -= 1;
+        particle.step += 1;
+        if (particle.step >= particle.route.length) return false;
+      }
+      return true;
+    });
+  }
+
+  function draw() {
+    const rect = svg.getBoundingClientRect();
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.round(rect.width * ratio);
+    const height = Math.round(rect.height * ratio);
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      canvas.style.width = `${rect.width}px`;
+      canvas.style.height = `${rect.height}px`;
+    }
+    const scale = (rect.width / layout.width) * ratio;
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, width, height);
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+    for (const particle of particles) {
+      if (particle.delay > 0) continue;
+      const [id, direction] = particle.route[particle.step];
+      const e = layout.edges.get(id);
+      if (!e) continue;
+      const [x, y] = bezier(e, direction > 0 ? particle.t : 1 - particle.t);
+      if (particle.cross) {
+        context.strokeStyle = palette.critical;
+        context.lineWidth = 2;
+        context.beginPath();
+        context.moveTo(x - 4, y - 4); context.lineTo(x + 4, y + 4);
+        context.moveTo(x + 4, y - 4); context.lineTo(x - 4, y + 4);
+        context.stroke();
+        continue;
+      }
+      context.beginPath();
+      context.arc(x, y, particle.size, 0, Math.PI * 2);
+      context.fillStyle = particle.color;
+      context.fill();
+      if (particle.size > 3) {
+        context.lineWidth = 2;
+        context.strokeStyle = palette.surface;
+        context.stroke();
+      }
+    }
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.1, (now - lastFrame) / 1000);
+    lastFrame = now;
+    if (layout && !document.hidden && !reduceMotion.matches) {
+      advance(dt);
+      draw();
+    } else if (layout && reduceMotion.matches && particles.length) {
+      particles = [];
+      context.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  return { update, onSnapshot, start: () => requestAnimationFrame(frame) };
+})();
+
+function renderPipelineTable(data) {
+  const rows = [];
+  const add = (name, role, rate, worker, notes) => rows.push([name, role, rate,
+    worker ? `${fmt.count(worker.depth)} / ${fmt.count(worker.capacity)}` : '—',
+    worker ? fmt.pct(worker.utilization) : '—',
+    worker ? fmt.count(worker.evicted + worker.rejected) : '—', notes]);
+  for (const feed of data.feeds) add(feed.name, 'feed thread', fmt.rate(feed.rate), null,
+    `${feed.symbols.join(', ')}${feed.paused ? ' · paused' : ''}`);
+  for (const strategy of data.strategies) add(strategy.name, `${strategy.kind} strategy`, fmt.rate(strategy.rate), strategy,
+    `topics ${strategy.symbols.length ? strategy.symbols.join(', ') : '*'} · ${strategy.signals} signals`);
+  add('order execution', 'worker', fmt.rate(data.execution.rate), data.execution, `${data.execution.submitted} orders`);
+  add('API gateway', `${data.api.io_threads} I/O threads`, fmt.rate(data.api.request_rate), null,
+    `window ${data.api.window_used}/${data.api.window_limit} · ${data.api.pending} waiting`);
+  add('position monitor', 'worker', fmt.rate(data.position_monitor.rate), data.position_monitor,
+    `${data.position_monitor.fills} fills`);
+  if (data.recorder) add('dashboard tap', 'worker', fmt.rate(data.recorder.rate), data.recorder, 'every event type, every topic');
+
+  const table = h('table', {}, h('thead', {}, h('tr', {},
+    ...['Component', 'Role', 'Rate', 'Mailbox', 'Busy', 'Dropped', 'Notes'].map((text, index) =>
+      h('th', { class: index >= 2 && index <= 5 ? 'r' : '', text })))));
+  const body = h('tbody');
+  for (const row of rows) body.append(h('tr', {}, ...row.map((text, index) => h('td', { class: index >= 2 && index <= 5 ? 'r' : '', text }))));
+  table.append(body);
+
+  const routes = h('table', { style: 'margin-top:12px' }, h('thead', {}, h('tr', {},
+    ...['Event', 'Topic', 'Subscriber'].map((text) => h('th', { text })))));
+  const routeBody = h('tbody');
+  for (const route of data.routes) routeBody.append(h('tr', {}, h('td', { text: route.event }), h('td', { text: route.topic }), h('td', { text: route.subscriber })));
+  routes.append(routeBody);
+  $('pipeline-table').replaceChildren(table, routes);
+}
+
+// ---------------------------------------------------------------- latency stages
+function latencyStages(data) {
+  const stages = data.strategies.map((strategy) => [`dispatch:${strategy.name}`, `${strategy.name}: bus → handler`,
+    (d) => (d.strategies.find((x) => x.name === strategy.name) || strategy).dispatch, strategy.name]);
+  stages.push(['dispatch:execution', 'execution: bus → handler', (d) => d.execution.dispatch, null]);
+  stages.push(['api:queue', 'gateway queue', (d) => d.api.queue_delay, null]);
+  stages.push(['api:limiter', 'rate-limit wait', (d) => d.api.limiter_wait, null]);
+  stages.push(['api:service', 'broker round trip', (d) => d.api.service, null]);
+  stages.push(['e2e', 'market data → position', (d) => d.position_monitor.end_to_end, null]);
+  return stages;
+}
+
+// ---------------------------------------------------------------- price small multiples
+const WINDOW_S = 20;
+const CHART_HEIGHT = 150;
+const charts = new Map();
+
+function niceTicks(low, high, count) {
+  const step = (high - low) / (count - 1);
+  return Array.from({ length: count }, (_, index) => low + step * index);
+}
+
+function signalsFor(data, symbol, since) {
+  return (data.tape || []).filter((entry) => entry.kind === 'signal' && entry.symbol === symbol && entry.t >= since);
+}
+
+function renderPrices(data) {
+  const container = $('prices');
+  const series = data.prices || [];
+  if (!series.length) {
+    if (!container.children.length) container.append(h('p', { class: 'muted', text: 'Waiting for market data…' }));
+    return;
+  }
+  for (const item of series) {
+    if (charts.has(item.symbol)) continue;
+    if (!charts.size) container.replaceChildren();
+    const svg = s('svg', { height: CHART_HEIGHT, role: 'img', 'aria-label': `${item.symbol} price, last ${WINDOW_S} seconds` });
+    const chart = { symbol: item.symbol, svg, pointer: null, view: null,
+      last: h('span', { class: 'last' }), rate: h('span', { class: 'muted', style: 'font-size:12px' }) };
+    container.append(h('div', { class: 'chart' },
+      h('div', { class: 'chart-head' }, h('strong', { text: item.symbol }), chart.rate, chart.last), svg));
+    svg.addEventListener('pointermove', (event) => { chart.pointer = [event.clientX, event.clientY]; hover(chart); });
+    svg.addEventListener('pointerleave', () => { chart.pointer = null; hideTooltip(); chart.svg.querySelector('.hover')?.remove(); });
+    charts.set(item.symbol, chart);
+  }
+  for (const item of series) drawPriceChart(charts.get(item.symbol), item, data);
+}
+
+function drawPriceChart(chart, item, data) {
+  const width = chart.svg.clientWidth || 320;
+  const top = 8;
+  const bottom = CHART_HEIGHT - 20;
+  const left = 2;
+  const right = width - 52;
+  const tMax = data.uptime_s;
+  const tMin = tMax - WINDOW_S;
+  const points = item.t.map((t, index) => [t, item.p[index]]).filter(([t]) => t >= tMin);
+  const signals = signalsFor(data, item.symbol, tMin);
+  chart.last.textContent = fmt.price(item.last);
+  const feedRate = state.latest.feeds.find((feed) => feed.symbols.includes(item.symbol));
+  chart.rate.textContent = feedRate ? `${fmt.rate(feedRate.rate / feedRate.symbols.length)} quotes` : '';
+
+  const svg = chart.svg;
+  svg.setAttribute('viewBox', `0 0 ${width} ${CHART_HEIGHT}`);
+  svg.replaceChildren();
+  if (points.length < 2) {
+    s('text', { x: 4, y: CHART_HEIGHT / 2, text: 'waiting for quotes' }, svg);
+    chart.view = null;
+    return;
+  }
+
+  const values = points.map(([, price]) => price).concat(signals.map((signal) => signal.price));
+  let low = Math.min(...values);
+  let high = Math.max(...values);
+  const padding = Math.max((high - low) * 0.12, Math.abs(high) * 0.0002);
+  low -= padding;
+  high += padding;
+  const x = (t) => left + ((t - tMin) / WINDOW_S) * (right - left);
+  const y = (price) => bottom - ((price - low) / (high - low)) * (bottom - top);
+
+  for (const tick of niceTicks(low + padding, high - padding, 3)) {
+    s('line', { class: 'gridline', x1: left, x2: right, y1: y(tick), y2: y(tick) }, svg);
+    s('text', { x: right + 6, y: y(tick) + 3, text: fmt.price(tick) }, svg);
+  }
+  s('line', { class: 'baseline', x1: left, x2: right, y1: bottom, y2: bottom }, svg);
+  for (const ago of [20, 15, 10, 5, 0]) {
+    s('text', { x: x(tMax - ago), y: CHART_HEIGHT - 5, 'text-anchor': ago === 20 ? 'start' : ago === 0 ? 'end' : 'middle',
+      text: ago === 0 ? 'now' : `−${ago}s` }, svg);
+  }
+  s('path', { class: 'price-line', d: points.map(([t, price], index) => `${index ? 'L' : 'M'}${x(t).toFixed(1)},${y(price).toFixed(1)}`).join('') }, svg);
+  for (const signal of signals) {
+    s('path', { d: markerPath(x(signal.t), y(signal.price), signal.side === 'BUY' ? 1 : -1, 5),
+      style: `fill:var(${colorVar(signal.strategy)});stroke:var(--surface)`, 'stroke-width': 2, 'stroke-linejoin': 'round' }, svg);
+  }
+  chart.view = { points, signals, x, y, left, right, top, bottom, tMax };
+  if (chart.pointer) hover(chart);
+}
+
+function signalRows(signal) {
+  return tipRow(`${signal.side} ${signal.qty} @ ${fmt.price(signal.price)}`, signal.strategy,
+    colorValue(signal.strategy), signal.side === 'BUY' ? 'buy' : 'sell');
+}
+
+function hover(chart) {
+  const view = chart.view;
+  chart.svg.querySelector('.hover')?.remove();
+  if (!view || !chart.pointer) return;
+  const rect = chart.svg.getBoundingClientRect();
+  const px = chart.pointer[0] - rect.left;
+  const py = chart.pointer[1] - rect.top;
+  const layer = s('g', { class: 'hover' }, chart.svg);
+
+  // A marker within 12 px wins; otherwise the crosshair snaps to the nearest quote.
+  const near = view.signals
+    .map((signal) => [signal, Math.hypot(view.x(signal.t) - px, view.y(signal.price) - py)])
+    .filter(([, distance]) => distance <= 12)
+    .sort((a, b) => a[1] - b[1])[0];
+  if (near) {
+    const [signal] = near;
+    s('circle', { cx: view.x(signal.t), cy: view.y(signal.price), r: 9, fill: 'none', style: 'stroke:var(--ink-2)', 'stroke-width': 1 }, layer);
+    showTooltip(chart.pointer[0], chart.pointer[1], [signalRows(signal),
+      tipRow(fmt.latency(signal.latency_ms * 1000), 'tick → signal'),
+      tipRow(`${(view.tMax - signal.t).toFixed(1)} s ago`, chart.symbol)]);
+    return;
+  }
+  const clampedX = clamp(px, view.left, view.right);
+  let nearest = view.points[0];
+  for (const point of view.points) if (Math.abs(view.x(point[0]) - clampedX) < Math.abs(view.x(nearest[0]) - clampedX)) nearest = point;
+  const cx = view.x(nearest[0]);
+  s('line', { class: 'crosshair', x1: cx, x2: cx, y1: view.top, y2: view.bottom }, layer);
+  s('circle', { cx, cy: view.y(nearest[1]), r: 4, style: 'fill:var(--ink-2);stroke:var(--surface)', 'stroke-width': 2 }, layer);
+  const rows = [tipRow(fmt.price(nearest[1]), `${chart.symbol} · ${(view.tMax - nearest[0]).toFixed(1)} s ago`)];
+  for (const signal of view.signals) if (Math.abs(signal.t - nearest[0]) <= 0.25) rows.push(signalRows(signal));
+  showTooltip(chart.pointer[0], chart.pointer[1], rows);
+}
+
+function renderPricesTable(data) {
+  const rows = (data.prices || []).map((item) => {
+    const since = data.uptime_s - WINDOW_S;
+    const recent = item.p.filter((_, index) => item.t[index] >= since);
+    return [item.symbol, fmt.price(item.last), fmt.price(Math.min(...recent)), fmt.price(Math.max(...recent)),
+      fmt.count(item.updates), String(signalsFor(data, item.symbol, since).length)];
+  });
+  $('prices-table').replaceChildren(simpleTable(['Symbol', 'Last', `Low (${WINDOW_S} s)`, `High (${WINDOW_S} s)`, 'Quotes', 'Signals'], rows, 1));
+}
+
+function simpleTable(headers, rows, firstNumeric) {
+  const table = h('table', {}, h('thead', {}, h('tr', {},
+    ...headers.map((text, index) => h('th', { class: index >= firstNumeric ? 'r' : '', text })))));
+  const body = h('tbody');
+  for (const row of rows) body.append(h('tr', {}, ...row.map((text, index) => h('td', { class: index >= firstNumeric ? 'r' : '', text }))));
+  table.append(body);
+  return table;
+}
+
+// ---------------------------------------------------------------- shared API gateway
+function renderLimiter(data) {
+  const root = $('limiter');
+  const api = data.api;
+  if (!root.children.length) {
+    root.append(
+      h('div', { class: 'limiter-head' }, h('div', {}, h('strong', { id: 'window-used' }), h('span', { class: 'secondary', id: 'window-label' })),
+        h('span', { class: 'muted', id: 'request-rate' })),
+      h('div', { class: 'meter', role: 'meter', id: 'window-meter', 'aria-valuemin': '0' }, h('div', { id: 'window-fill' })),
+      h('div', { class: 'stats', id: 'api-stats' }),
+      h('div', { class: 'notice', id: 'api-notice', role: 'status' }),
+      h('div', { class: 'muted', style: 'font-size:12px;margin-top:6px', text: 'Orders waiting for rate-limit capacity, last 30 s' }),
+      s('svg', { class: 'limiter-chart', id: 'pending-chart', height: 96, style: 'width:100%;display:block' }));
+  }
+  const fraction = api.window_used / Math.max(1, api.window_limit);
+  $('window-used').textContent = `${api.window_used} / ${api.window_limit}`;
+  $('window-label').textContent = ` requests in the last ${api.window_ms} ms`;
+  $('request-rate').textContent = `${fmt.rate(lastPoint().requests)} submitted`;
+  const meterNode = $('window-meter');
+  meterNode.setAttribute('aria-valuemax', String(api.window_limit));
+  meterNode.setAttribute('aria-valuenow', String(api.window_used));
+  $('window-fill').style.width = `${clamp(fraction, 0, 1) * 100}%`;
+  $('window-fill').style.background = fraction >= 1 ? 'var(--warning)' : 'var(--accent)';
+
+  const stats = [
+    ['Waiting', fmt.count(api.pending)], ['In flight', `${api.active} / ${api.io_threads}`],
+    ['Completed', fmt.count(api.completed)], ['Retries', fmt.count(api.retries)],
+    ['HTTP 429', fmt.count(api.rate_limited)], ['Timeouts', fmt.count(api.timeouts)],
+    ['Cancelled', fmt.count(api.cancelled)], ['Queue full', fmt.count(api.rejected_full)],
+    ['Broker', `${api.mock_latency_ms} ms`],
+  ];
+  $('api-stats').replaceChildren(...stats.map(([key, value]) => h('div', { class: 'stat' }, h('div', { class: 'k', text: key }), h('div', { class: 'v', text: value }))));
+
+  const notice = $('api-notice');
+  if (api.paused_ms > 0) {
+    notice.replaceChildren(h('span', { class: 'status-icon', style: 'color:var(--warning)', text: '⚠︎' }),
+      h('span', { text: `Broker returned HTTP 429: every I/O thread pauses ${api.paused_ms} ms (Retry-After)` }));
+  } else if (api.pending > 0 && fraction >= 1) {
+    notice.replaceChildren(h('span', { class: 'status-icon', style: 'color:var(--warning)', text: '⚠︎' }),
+      h('span', { text: 'Limit reached: orders queue here, strategies keep running' }));
+  } else {
+    notice.replaceChildren(h('span', { class: 'status-icon', style: 'color:var(--good)', text: '●' }),
+      h('span', { text: 'Within the shared limit' }));
+  }
+  drawPendingChart($('pending-chart'), state.history);
+}
+
+function drawPendingChart(svg, history) {
+  const width = svg.clientWidth || 300;
+  const height = 96;
+  const top = 6;
+  const bottom = height - 18;
+  const right = width - 34;
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.replaceChildren();
+  if (history.length < 2) return;
+  const tMax = history[history.length - 1].t;
+  const span = 30;
+  const max = Math.max(4, ...history.map((point) => point.pending));
+  const x = (t) => ((t - (tMax - span)) / span) * right;
+  const y = (value) => bottom - (value / max) * (bottom - top);
+  const visible = history.filter((point) => point.t >= tMax - span);
+  for (const tick of [0, max]) {
+    s('line', { class: tick ? 'gridline' : 'baseline', x1: 0, x2: right, y1: y(tick), y2: y(tick) }, svg);
+    s('text', { x: right + 6, y: y(tick) + 3, text: fmt.count(tick) }, svg);
+  }
+  s('text', { x: 0, y: height - 4, text: `−${span}s` }, svg);
+  s('text', { x: right, y: height - 4, 'text-anchor': 'end', text: 'now' }, svg);
+  const line = visible.map((point, index) => `${index ? 'L' : 'M'}${x(point.t).toFixed(1)},${y(point.pending).toFixed(1)}`).join('');
+  s('path', { d: `${line}L${x(visible[visible.length - 1].t).toFixed(1)},${bottom}L${x(visible[0].t).toFixed(1)},${bottom}Z`,
+    style: 'fill:var(--accent-wash)' }, svg);
+  s('path', { d: line, fill: 'none', style: 'stroke:var(--accent)', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }, svg);
+  const last = visible[visible.length - 1];
+  s('circle', { cx: x(last.t), cy: y(last.pending), r: 4, style: 'fill:var(--accent);stroke:var(--surface)', 'stroke-width': 2 }, svg);
+}
+
+// ---------------------------------------------------------------- latency table
+function renderLatency(data) {
+  const stages = latencyStages(data);
+  const root = $('latency-table');
+  const key = stages.map(([id]) => id).join('|');
+  if (root.dataset.key !== key) {
+    root.dataset.key = key;
+    const body = h('tbody');
+    for (const [id, text, , strategy] of stages) {
+      const name = h('td');
+      if (strategy) name.append(h('span', { class: 'swatch', style: `background:var(${colorVar(strategy)})` }));
+      name.append(document.createTextNode(text));
+      body.append(h('tr', { 'data-stage': id }, name, h('td', { class: 'r' }), h('td', { class: 'r' }), h('td', { class: 'r' }),
+        h('td', { class: 'r muted' }), h('td', {}, s('svg', { class: 'spark', 'aria-hidden': 'true' }))));
+    }
+    root.replaceChildren(h('table', {}, h('thead', {}, h('tr', {},
+      ...['Stage', 'p50', 'p99', 'max', 'p99 overall', 'Trend'].map((text, index) =>
+        h('th', { class: index >= 1 && index <= 4 ? 'r' : '', text })))), body));
+  }
+  for (const [id, , pick] of stages) {
+    const row = root.querySelector(`[data-stage="${CSS.escape(id)}"]`);
+    const latency = pick(data);
+    const recent = latency.recent;
+    const cells = row.children;
+    cells[1].textContent = recent.count ? fmt.latency(recent.p50) : '—';
+    cells[2].textContent = recent.count ? fmt.latency(recent.p99) : '—';
+    cells[3].textContent = recent.count ? fmt.latency(recent.max) : '—';
+    cells[4].textContent = fmt.latency(latency.all.p99);
+    sparkline(cells[5].firstChild, state.history.map((point) => point.latency[id]?.count ? point.latency[id].p99 : null));
+  }
+}
+
+// ---------------------------------------------------------------- tape and positions
+const TAPE_KIND = {
+  signal: { icon: '◆', color: 'var(--ink-2)', label: 'signal' },
+  fill: { icon: '●', color: 'var(--good)', label: 'fill' },
+  rejection: { icon: '✕', color: 'var(--critical)', label: 'rejected' },
+};
+
+function strategyCell(name) {
+  return h('td', {}, h('span', { class: 'swatch', style: `background:var(${colorVar(name)})` }), document.createTextNode(name));
+}
+
+function renderTape(data) {
+  const entries = (data.tape || []).slice(-16).reverse();
+  if (!entries.length) {
+    $('tape').replaceChildren(h('p', { class: 'muted', text: 'No signals yet. EMA strategies warm up over their first 600 quotes.' }));
+    return;
+  }
+  const body = h('tbody');
+  for (const entry of entries) {
+    const kind = TAPE_KIND[entry.kind];
+    body.append(h('tr', {},
+      h('td', { class: 'r muted', text: `${Math.max(0, data.uptime_s - entry.t).toFixed(1)} s` }),
+      h('td', {}, h('span', { class: 'status-icon', style: `color:${kind.color}`, text: kind.icon }), document.createTextNode(` ${kind.label}`)),
+      strategyCell(entry.strategy),
+      h('td', { text: entry.symbol }),
+      h('td', { text: `${entry.side === 'BUY' ? '▲' : '▼'} ${entry.side}` }),
+      h('td', { class: 'r', text: fmt.count(entry.qty) }),
+      h('td', { class: 'r', text: entry.price ? fmt.price(entry.price) : '—' }),
+      h('td', { class: 'r', text: fmt.latency(entry.latency_ms * 1000) }),
+      h('td', { class: 'muted', text: entry.detail })));
+  }
+  $('tape').replaceChildren(h('table', {}, h('thead', {}, h('tr', {},
+    ...['Age', 'Event', 'Strategy', 'Symbol', 'Side', 'Qty', 'Price', 'Latency', 'Detail'].map((text, index) =>
+      h('th', { class: [0, 5, 6, 7].includes(index) ? 'r' : '', text })))), body));
+}
+
+function renderPositions(data) {
+  if (!data.positions.length) {
+    $('positions').replaceChildren(h('p', { class: 'muted', text: 'No fills yet.' }));
+    return;
+  }
+  const body = h('tbody');
+  for (const position of data.positions) {
+    const pnl = position.pnl;
+    const digits = Math.abs(pnl ?? 0) >= 100 ? 0 : 2;
+    body.append(h('tr', {}, strategyCell(position.strategy), h('td', { text: position.symbol }),
+      h('td', { class: 'r', text: fmt.signed(position.quantity, 0) }), h('td', { class: 'r', text: fmt.count(position.fills) }),
+      h('td', { class: `r ${pnl > 0 ? 'up' : pnl < 0 ? 'down' : ''}`, text: pnl == null ? '—' : fmt.signed(pnl, digits) })));
+  }
+  $('positions').replaceChildren(h('table', {}, h('thead', {}, h('tr', {},
+    ...['Strategy', 'Symbol', 'Position', 'Fills', 'P&L'].map((text, index) => h('th', { class: index >= 2 ? 'r' : '', text })))), body));
+}
+
+// ---------------------------------------------------------------- start
+function setupTableToggle(buttonId, tableId, chartId) {
+  const button = $(buttonId);
+  button.addEventListener('click', () => {
+    const showTable = button.getAttribute('aria-pressed') !== 'true';
+    button.setAttribute('aria-pressed', String(showTable));
+    $(tableId).hidden = !showTable;
+    $(chartId).hidden = showTable;
+    if (state.latest) render();
+  });
+}
+
+refreshPalette();
+setupTheme();
+setupControls();
+setupTableToggle('pipeline-table-toggle', 'pipeline-table', 'diagram-view');
+setupTableToggle('prices-table-toggle', 'prices-table', 'prices');
+window.addEventListener('resize', () => { if (state.latest) render(); });
+pipeline.start();
+connect();
+
+
+
+</script>
+</body>
+</html>

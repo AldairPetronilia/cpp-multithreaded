@@ -1,142 +1,109 @@
 #pragma once
 
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <typeindex>
-#include <utility>
 
 namespace trading {
 
 using MonotonicClock = std::chrono::steady_clock;
 using TimePoint = MonotonicClock::time_point;
 
-class Event {
-public:
-    virtual ~Event() = default;
+// Events are plain aggregates published once and shared immutably by every subscriber, so
+// they need no common base class or virtual destructor. The name is used for diagnostics.
+template <typename T>
+concept BusEvent = std::is_class_v<T> && requires {
+    { T::kEventName } -> std::convertible_to<std::string_view>;
 };
 
-enum class Side {
+// A topic partitions one event type into independently subscribable streams, such as one
+// market-data stream per instrument. Topics are interned integers so that routing never
+// hashes or compares strings on the publish path. Topic{} is the untagged stream.
+struct Topic {
+    std::uint32_t id{0};
+
+    friend constexpr bool operator==(Topic, Topic) noexcept = default;
+};
+
+enum class Side : std::uint8_t {
     buy,
     sell,
 };
 
-[[nodiscard]] inline const char* to_string(Side side) noexcept {
+[[nodiscard]] constexpr const char* to_string(Side side) noexcept {
     return side == Side::buy ? "BUY" : "SELL";
 }
 
-struct MarketDataEvent final : Event {
-    std::string symbol;
-    double price{};
-    std::uint64_t source_sequence{};
-    TimePoint source_time{};
+struct MarketDataEvent {
+    static constexpr std::string_view kEventName = "MarketData";
 
-    MarketDataEvent(std::string symbol_value,
-                    double price_value,
-                    std::uint64_t sequence_value,
-                    TimePoint source_time_value = MonotonicClock::now())
-        : symbol(std::move(symbol_value)),
-          price(price_value),
-          source_sequence(sequence_value),
-          source_time(source_time_value) {}
+    std::string symbol{};
+    double price{};
+    std::uint64_t sequence{};
+    TimePoint source_time{};
 };
 
-struct TradingSignalEvent final : Event {
+struct TradingSignalEvent {
+    static constexpr std::string_view kEventName = "TradingSignal";
+
+    std::string strategy{};
     std::uint64_t signal_id{};
-    std::string symbol;
+    std::string symbol{};
     Side side{Side::buy};
     double quantity{};
     double reference_price{};
     TimePoint market_data_time{};
     TimePoint signal_time{};
-
-    TradingSignalEvent(std::uint64_t id,
-                       std::string symbol_value,
-                       Side side_value,
-                       double quantity_value,
-                       double price_value,
-                       TimePoint market_time,
-                       TimePoint signal_time_value = MonotonicClock::now())
-        : signal_id(id),
-          symbol(std::move(symbol_value)),
-          side(side_value),
-          quantity(quantity_value),
-          reference_price(price_value),
-          market_data_time(market_time),
-          signal_time(signal_time_value) {}
 };
 
-struct ExecutionReportEvent final : Event {
+struct ExecutionReportEvent {
+    static constexpr std::string_view kEventName = "ExecutionReport";
+
+    std::string strategy{};
     std::uint64_t signal_id{};
-    std::string client_order_id;
-    std::string symbol;
+    std::string client_order_id{};
+    std::string symbol{};
     Side side{Side::buy};
     double quantity{};
     double fill_price{};
     bool filled{};
-    std::string message;
+    std::string message{};
     TimePoint market_data_time{};
     TimePoint execution_time{};
     std::chrono::nanoseconds api_queue_delay{};
     std::chrono::nanoseconds rate_limit_wait{};
     std::chrono::nanoseconds api_service_time{};
-
-    ExecutionReportEvent(std::uint64_t signal_id_value,
-                         std::string order_id,
-                         std::string symbol_value,
-                         Side side_value,
-                         double quantity_value,
-                         double fill_price_value,
-                         bool filled_value,
-                         std::string message_value,
-                         TimePoint market_time,
-                         TimePoint execution_time_value,
-                         std::chrono::nanoseconds queue_delay = {},
-                         std::chrono::nanoseconds limiter_wait = {},
-                         std::chrono::nanoseconds service_time = {})
-        : signal_id(signal_id_value),
-          client_order_id(std::move(order_id)),
-          symbol(std::move(symbol_value)),
-          side(side_value),
-          quantity(quantity_value),
-          fill_price(fill_price_value),
-          filled(filled_value),
-          message(std::move(message_value)),
-          market_data_time(market_time),
-          execution_time(execution_time_value),
-          api_queue_delay(queue_delay),
-          rate_limit_wait(limiter_wait),
-          api_service_time(service_time) {}
 };
 
-struct BenchmarkEvent final : Event {
+struct BenchmarkEvent {
+    static constexpr std::string_view kEventName = "Benchmark";
+
     std::uint64_t producer_id{};
     std::uint64_t sequence{};
-
-    BenchmarkEvent(std::uint64_t producer, std::uint64_t sequence_value)
-        : producer_id(producer), sequence(sequence_value) {}
 };
 
 struct EventEnvelope {
     std::type_index type{typeid(void)};
-    std::uint64_t bus_sequence{};
+    Topic topic{};
     TimePoint published_at{};
-    std::shared_ptr<const Event> payload;
+    std::shared_ptr<const void> payload{};
 
-    template <typename EventType>
+    template <BusEvent E>
     [[nodiscard]] bool is() const noexcept {
-        return type == std::type_index(typeid(EventType));
+        return type == std::type_index(typeid(E));
     }
 
-    template <typename EventType>
-    [[nodiscard]] std::shared_ptr<const EventType> as() const noexcept {
-        if (!is<EventType>()) {
-            return {};
-        }
-        return std::static_pointer_cast<const EventType>(payload);
+    // Borrowed pointer: valid while this envelope, or a copy of it, is alive. Handlers read
+    // events without touching the shared reference count.
+    template <BusEvent E>
+    [[nodiscard]] const E* as() const noexcept {
+        return is<E>() ? static_cast<const E*>(payload.get()) : nullptr;
     }
 };
 
 }  // namespace trading
-

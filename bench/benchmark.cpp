@@ -4,6 +4,7 @@
 #include "trading/metrics.hpp"
 #include "trading/workers.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -26,87 +28,182 @@ using namespace std::chrono_literals;
 
 std::size_t parse_size(std::string_view value, std::string_view name) {
     std::size_t parsed{};
-    const auto [end, error] =
-        std::from_chars(value.data(), value.data() + value.size(), parsed);
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
     if (error != std::errc{} || end != value.data() + value.size() || parsed == 0U) {
         throw std::invalid_argument("invalid " + std::string(name));
     }
     return parsed;
 }
 
-void print_summary(std::string_view name, const trading::LatencySummary& summary) {
-    std::cout << "  " << name << ": count=" << summary.count << std::fixed
-              << std::setprecision(2) << " mean=" << summary.mean_us
-              << "us p50=" << summary.p50_us << "us p95=" << summary.p95_us
-              << "us p99=" << summary.p99_us << "us max=" << summary.maximum_us
-              << "us\n";
+void print_latency(std::string_view name, const trading::LatencySummary& summary) {
+    std::cout << "    " << std::left << std::setw(26) << name << std::right << std::fixed << std::setprecision(2)
+              << " n=" << summary.count << " mean=" << summary.mean_us << "us p50=" << summary.p50_us
+              << "us p99=" << summary.p99_us << "us max=" << summary.max_us << "us\n";
 }
 
-void run_event_benchmark(std::size_t event_count, std::size_t producer_count) {
-    trading::EventBus bus;
-    trading::LatencyRecorder latency;
-    std::atomic<std::size_t> consumed{0};
-    std::mutex completion_mutex;
-    std::condition_variable completion;
+// Counts handled events and lets the benchmark wait for a target without polling.
+class Consumed {
+public:
+    void add(std::size_t count = 1) {
+        {
+            std::lock_guard lock(mutex_);
+            value_ += count;
+        }
+        wakeup_.notify_all();
+    }
 
-    trading::EventWorker consumer(
-        "benchmark-consumer", bus, event_count,
-        [&](const trading::EventEnvelope& envelope) {
-            latency.record(trading::MonotonicClock::now() - envelope.published_at);
-            if (consumed.fetch_add(1, std::memory_order_acq_rel) + 1U == event_count) {
-                completion.notify_one();
-            }
-        });
-    consumer.subscribe<trading::BenchmarkEvent>();
-    consumer.start();
+    void wait_for(std::size_t target) {
+        std::unique_lock lock(mutex_);
+        if (!wakeup_.wait_for(lock, 60s, [&] { return value_ >= target; })) {
+            throw std::runtime_error("timed out waiting for consumers");
+        }
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable wakeup_;
+    std::size_t value_{0};
+};
+
+struct Consumer {
+    std::unique_ptr<trading::EventWorker> worker;
+    std::unique_ptr<trading::LatencyHistogram> latency;
+};
+
+// Workers that record publish-to-handler latency; notifying on every event would itself
+// dominate the measurement, so completion is signalled once per consumer.
+std::vector<Consumer> make_consumers(trading::EventBus& bus,
+                                     std::size_t count,
+                                     std::size_t capacity,
+                                     std::size_t expected_each,
+                                     Consumed& consumed,
+                                     const std::vector<trading::Topic>& topics = {}) {
+    std::vector<Consumer> consumers;
+    for (std::size_t index = 0; index < count; ++index) {
+        auto latency = std::make_unique<trading::LatencyHistogram>();
+        auto seen = std::make_shared<std::size_t>(0);
+        auto worker = std::make_unique<trading::EventWorker>(
+            "consumer-" + std::to_string(index), bus, trading::WorkerOptions{capacity},
+            [&consumed, histogram = latency.get(), seen, expected_each](const trading::EventEnvelope& envelope) {
+                histogram->record(trading::MonotonicClock::now() - envelope.published_at);
+                if (++*seen == expected_each) {
+                    consumed.add();
+                }
+            });
+        if (topics.empty()) {
+            worker->subscribe<trading::BenchmarkEvent>();
+        } else {
+            worker->subscribe<trading::BenchmarkEvent>(topics[index]);
+        }
+        worker->start();
+        consumers.push_back(Consumer{std::move(worker), std::move(latency)});
+    }
+    return consumers;
+}
+
+double seconds(trading::MonotonicClock::duration duration) {
+    return std::chrono::duration<double>(duration).count();
+}
+
+// Saturated throughput: publishers go as fast as they can into one subscriber.
+void run_fan_in(std::size_t event_count, std::size_t publisher_count) {
+    trading::EventBus bus;
+    Consumed consumed;
+    auto consumers = make_consumers(bus, 1, event_count, event_count, consumed);
+    std::atomic<std::size_t> rejected{0};
 
     const auto started = trading::MonotonicClock::now();
-    std::atomic<std::size_t> rejected{0};
-    std::vector<std::thread> producers;
-    producers.reserve(producer_count);
-    for (std::size_t producer = 0; producer < producer_count; ++producer) {
-        const auto first = event_count * producer / producer_count;
-        const auto last = event_count * (producer + 1U) / producer_count;
-        producers.emplace_back([&bus, &rejected, producer, first, last] {
+    std::vector<std::thread> publishers;
+    for (std::size_t publisher = 0; publisher < publisher_count; ++publisher) {
+        publishers.emplace_back([&, publisher] {
+            const auto first = event_count * publisher / publisher_count;
+            const auto last = event_count * (publisher + 1U) / publisher_count;
             for (auto sequence = first; sequence < last; ++sequence) {
-                const auto result = bus.publish(trading::BenchmarkEvent{producer, sequence});
-                if (!result.all_delivered()) {
+                if (!bus.publish(trading::BenchmarkEvent{publisher, sequence}).all_delivered()) {
                     rejected.fetch_add(1, std::memory_order_relaxed);
                 }
             }
         });
     }
-    for (auto& producer : producers) {
-        producer.join();
+    for (auto& publisher : publishers) {
+        publisher.join();
     }
-    if (rejected.load(std::memory_order_relaxed) != 0U) {
-        throw std::runtime_error("benchmark mailbox unexpectedly overflowed");
+    consumed.wait_for(1);
+    const auto elapsed = seconds(trading::MonotonicClock::now() - started);
+    if (rejected.load() != 0U) {
+        throw std::runtime_error("fan-in benchmark mailbox overflowed");
     }
-    {
-        std::unique_lock lock(completion_mutex);
-        if (!completion.wait_for(lock, 30s, [&] {
-                return consumed.load(std::memory_order_acquire) == event_count;
-            })) {
-            throw std::runtime_error("timed out waiting for benchmark consumer");
+    const auto stats = consumers.front().worker->stats();
+    std::cout << "  fan-in  " << publisher_count << " publishers -> 1 subscriber: " << std::fixed
+              << std::setprecision(0) << static_cast<double>(event_count) / elapsed
+              << " events/s, max queue " << stats.mailbox.max_depth << '\n';
+    print_latency("publish-to-handler", consumers.front().latency->summary());
+}
+
+// One publisher delivering to `subscriber_count` workers, either all on one topic (fan-out)
+// or each on its own topic (the per-strategy market-data layout).
+void run_scaling(std::size_t event_count, std::size_t subscriber_count, bool partition_by_topic) {
+    trading::EventBus bus;
+    std::vector<trading::Topic> topics;
+    if (partition_by_topic) {
+        for (std::size_t index = 0; index < subscriber_count; ++index) {
+            topics.push_back(bus.topic("SYM" + std::to_string(index)));
         }
     }
-    const auto elapsed = trading::MonotonicClock::now() - started;
-    consumer.stop();
+    const auto expected_each = partition_by_topic ? event_count / subscriber_count : event_count;
+    Consumed consumed;
+    auto consumers = make_consumers(bus, subscriber_count, expected_each, expected_each, consumed, topics);
 
-    const auto seconds = std::chrono::duration<double>(elapsed).count();
-    const auto stats = consumer.stats();
-    std::cout << "Internal event bus (one subscriber, " << producer_count
-              << " concurrent publisher(s)):\n";
-    std::cout << "  events=" << event_count << " elapsed=" << std::fixed
-              << std::setprecision(4) << seconds << "s throughput="
-              << static_cast<double>(event_count) / seconds << " events/s"
-              << " max_queue=" << stats.max_queue_depth << '\n';
-    print_summary("publish-to-handler", latency.summarize());
+    const auto started = trading::MonotonicClock::now();
+    for (std::size_t sequence = 0; sequence < expected_each * (partition_by_topic ? subscriber_count : 1U);
+         ++sequence) {
+        const auto topic = partition_by_topic ? topics[sequence % subscriber_count] : trading::Topic{};
+        if (!bus.publish(trading::BenchmarkEvent{0, sequence}, topic).all_delivered()) {
+            throw std::runtime_error("scaling benchmark mailbox overflowed");
+        }
+    }
+    const auto publish_elapsed = seconds(trading::MonotonicClock::now() - started);
+    consumed.wait_for(subscriber_count);
+    const auto elapsed = seconds(trading::MonotonicClock::now() - started);
+    const auto published = expected_each * (partition_by_topic ? subscriber_count : 1U);
+    const auto deliveries = expected_each * subscriber_count;
+
+    std::uint64_t worst_p99 = 0;
+    for (const auto& consumer : consumers) {
+        worst_p99 = std::max<std::uint64_t>(worst_p99, static_cast<std::uint64_t>(consumer.latency->summary().p99_us));
+    }
+    std::cout << "  " << (partition_by_topic ? "topics " : "fan-out") << ' ' << std::setw(2) << subscriber_count
+              << " subscriber(s): " << std::fixed << std::setprecision(0)
+              << static_cast<double>(deliveries) / elapsed << " deliveries/s, "
+              << std::setprecision(1) << publish_elapsed * 1e9 / static_cast<double>(published)
+              << " ns per publish, worst consumer p99 " << worst_p99 << "us\n";
+}
+
+// Latency at a sustainable rate: the consumer is idle between events, so this includes the
+// cost of waking a blocked thread, unlike the saturated runs above.
+void run_paced_latency(std::size_t rate_per_second, std::chrono::milliseconds duration) {
+    trading::EventBus bus;
+    const auto total = static_cast<std::size_t>(rate_per_second * static_cast<std::size_t>(duration.count()) / 1'000U);
+    Consumed consumed;
+    auto consumers = make_consumers(bus, 1, 4'096, total, consumed);
+
+    const auto interval = std::chrono::nanoseconds(1'000'000'000LL / static_cast<long long>(rate_per_second));
+    auto next = trading::MonotonicClock::now();
+    for (std::size_t sequence = 0; sequence < total; ++sequence) {
+        // The benchmark paces itself by spinning: sleeping is far coarser than the interval.
+        while (trading::MonotonicClock::now() < next) {
+            std::this_thread::yield();
+        }
+        next += interval;
+        bus.publish(trading::BenchmarkEvent{0, sequence});
+    }
+    consumed.wait_for(1);
+    std::cout << "  paced " << rate_per_second << " events/s for " << duration.count() << " ms:\n";
+    print_latency("publish-to-handler", consumers.front().latency->summary());
 }
 
 void run_api_benchmark(std::size_t request_count) {
-    auto client = std::make_shared<trading::MockTradingApi>(
-        trading::MockApiConfig{1ms, 0, 0ms, 0});
+    auto client = std::make_shared<trading::MockTradingApi>(trading::MockApiConfig{1ms});
     trading::ApiManagerConfig config;
     config.rate_limit = {50, 50ms};
     config.io_threads = 4;
@@ -114,13 +211,11 @@ void run_api_benchmark(std::size_t request_count) {
     config.max_retries = 0;
     trading::ApiRequestManager manager(client, config);
 
-    trading::LatencyRecorder queue_delay;
-    trading::LatencyRecorder limiter_wait;
-    trading::LatencyRecorder service_time;
-    trading::LatencyRecorder total_time;
-    std::atomic<std::size_t> completed{0};
-    std::mutex completion_mutex;
-    std::condition_variable completion;
+    trading::LatencyHistogram queue_delay;
+    trading::LatencyHistogram limiter_wait;
+    trading::LatencyHistogram service_time;
+    trading::LatencyHistogram total_time;
+    Consumed completed;
 
     const auto started = trading::MonotonicClock::now();
     for (std::size_t index = 0; index < request_count; ++index) {
@@ -128,41 +223,28 @@ void run_api_benchmark(std::size_t request_count) {
         request.endpoint = "/benchmark";
         request.idempotent = true;
         request.idempotency_key = "benchmark-" + std::to_string(index);
-        const auto result = manager.submit(
-            std::move(request), [&](trading::ApiResponse response) {
-                queue_delay.record(response.timing.queue_delay);
-                limiter_wait.record(response.timing.rate_limit_wait);
-                service_time.record(response.timing.service_time);
-                total_time.record(response.timing.total_time);
-                if (completed.fetch_add(1, std::memory_order_acq_rel) + 1U == request_count) {
-                    completion.notify_one();
-                }
-            });
+        const auto result = manager.submit(std::move(request), [&](trading::ApiResponse response) {
+            queue_delay.record(response.timing.queue_delay);
+            limiter_wait.record(response.timing.rate_limit_wait);
+            service_time.record(response.timing.service_time);
+            total_time.record(response.timing.total_time);
+            completed.add();
+        });
         if (!result.accepted()) {
             throw std::runtime_error("API benchmark queue unexpectedly rejected a request");
         }
     }
-
-    {
-        std::unique_lock lock(completion_mutex);
-        if (!completion.wait_for(lock, 30s, [&] {
-                return completed.load(std::memory_order_acquire) == request_count;
-            })) {
-            throw std::runtime_error("timed out waiting for API benchmark");
-        }
-    }
+    completed.wait_for(request_count);
     manager.shutdown(trading::ApiShutdownMode::drain);
-    const auto elapsed = trading::MonotonicClock::now() - started;
-    const auto seconds = std::chrono::duration<double>(elapsed).count();
+    const auto elapsed = seconds(trading::MonotonicClock::now() - started);
 
-    std::cout << "Shared API manager (4 I/O threads, mock API 1ms, limit 50/50ms):\n";
-    std::cout << "  requests=" << request_count << " elapsed=" << std::fixed
-              << std::setprecision(4) << seconds << "s throughput="
-              << static_cast<double>(request_count) / seconds << " requests/s\n";
-    print_summary("queue delay", queue_delay.summarize());
-    print_summary("rate-limit wait", limiter_wait.summarize());
-    print_summary("mock service", service_time.summarize());
-    print_summary("submission-to-completion", total_time.summarize());
+    std::cout << "  " << request_count << " requests, 4 I/O threads, mock latency 1 ms, limit 50/50 ms: "
+              << std::fixed << std::setprecision(0) << static_cast<double>(request_count) / elapsed
+              << " requests/s (window: 50 at once, then 50 per 50 ms)\n";
+    print_latency("queue delay", queue_delay.summary());
+    print_latency("rate-limit wait", limiter_wait.summary());
+    print_latency("mock service", service_time.summary());
+    print_latency("submission-to-completion", total_time.summary());
 }
 
 }  // namespace
@@ -170,14 +252,24 @@ void run_api_benchmark(std::size_t request_count) {
 int main(int argc, char* argv[]) {
     try {
         const auto event_count = argc > 1 ? parse_size(argv[1], "event count") : 200'000U;
-        const auto producer_count = argc > 2 ? parse_size(argv[2], "producer count") : 4U;
+        const auto publisher_count = argc > 2 ? parse_size(argv[2], "publisher count") : 4U;
         const auto request_count = argc > 3 ? parse_size(argv[3], "request count") : 200U;
-        run_event_benchmark(event_count, producer_count);
+        std::cout << "Internal messaging (histogram percentiles are within ~3%):\n";
+        run_fan_in(event_count, 1);
+        run_fan_in(event_count, publisher_count);
+        for (const std::size_t subscribers : {1U, 2U, 4U, 8U}) {
+            run_scaling(event_count, subscribers, false);
+        }
+        for (const std::size_t subscribers : {2U, 4U, 8U}) {
+            run_scaling(event_count, subscribers, true);
+        }
+        run_paced_latency(20'000, 1'000ms);
+        std::cout << "Shared API manager (separate from messaging):\n";
         run_api_benchmark(request_count);
         return 0;
     } catch (const std::exception& exception) {
         std::cerr << "benchmark failed: " << exception.what() << '\n';
-        std::cerr << "Usage: trading_benchmark [event-count] [producer-count] [request-count]\n";
+        std::cerr << "Usage: trading_benchmark [event-count] [publisher-count] [request-count]\n";
         return 1;
     }
 }
