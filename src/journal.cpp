@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cerrno>
 #include <cstring>
+#include <limits>
 #include <fstream>
 #include <iostream>
 #include <random>
@@ -368,6 +370,8 @@ std::optional<JournalRecord> encode_record(const EventEnvelope& envelope, std::s
         writer.str(supervision->detail);
         writer.u64(supervision->generation);
         writer.f64(supervision->recovery_ms);
+        // Added after the first recordings; decoders treat it as optional.
+        writer.f64(supervision->detect_ms);
     } else {
         return std::nullopt;
     }
@@ -453,6 +457,9 @@ std::optional<SupervisionEvent> decode_supervision(const JournalRecord& record, 
     event.detail = reader.str();
     event.generation = reader.u64();
     event.recovery_ms = reader.f64();
+    if (reader.ok() && !reader.rest().empty()) {
+        event.detect_ms = reader.f64();
+    }
     event.at = stamp;
     return reader.ok() ? std::optional(std::move(event)) : std::nullopt;
 }
@@ -618,49 +625,81 @@ void JournalWriter::close_segment_locked() {
 }
 
 void JournalWriter::flush_locked() {
-    if (buffer_.empty() || file_ == nullptr) {
+    if (buffer_.empty() || file_ == nullptr || stats_.failed) {
         return;
     }
     if (std::fwrite(buffer_.data(), 1, buffer_.size(), file_) != buffer_.size() || std::fflush(file_) != 0) {
-        buffer_.clear();
-        throw JournalError("journal write failed");
+        // Part of the buffer may have reached the file: a torn record that reopening
+        // truncates. Nothing more is appended after it.
+        fail_locked(std::string("write failed: ") + std::strerror(errno));
+        return;
     }
     stats_.bytes += buffer_.size();
     ++stats_.flushes;
     buffer_.clear();
+    buffered_records_ = 0;
 }
 
 void JournalWriter::fsync_locked() {
-    if (file_ == nullptr) {
+    if (file_ == nullptr || stats_.failed) {
         return;
     }
-    std::fflush(file_);
+    bool synced = std::fflush(file_) == 0;
 #if TRADING_JOURNAL_POSIX
     const int descriptor = ::fileno(file_);
 #if defined(__APPLE__) && defined(F_FULLFSYNC)
     if (config_.full_fsync) {
-        ::fcntl(descriptor, F_FULLFSYNC);
+        synced = synced && ::fcntl(descriptor, F_FULLFSYNC) != -1;
     } else {
-        ::fsync(descriptor);
+        synced = synced && ::fsync(descriptor) == 0;
     }
 #else
-    ::fsync(descriptor);
+    synced = synced && ::fsync(descriptor) == 0;
 #endif
 #endif
+    if (!synced) {
+        fail_locked(std::string("sync to disk failed: ") + std::strerror(errno));
+        return;
+    }
     ++stats_.fsyncs;
     last_fsync_ = std::chrono::steady_clock::now();
+}
+
+void JournalWriter::fail_locked(const std::string& what) {
+    if (!stats_.failed) {
+        stats_.failed = true;
+        stats_.error = what;
+        std::cerr << "journal failed: " << what << "; no longer recording\n";
+    }
+    stats_.lost_records += buffered_records_;
+    buffered_records_ = 0;
+    buffer_.clear();
 }
 
 void JournalWriter::append_locked(JournalKind kind, std::int64_t wall_ns, std::string_view topic,
                                   std::string_view payload) {
     const std::size_t body_size = kBodyFixed + topic.size() + payload.size();
     const std::size_t frame_size = kFrameHeader + body_size;
+    if (stats_.failed) {
+        ++stats_.lost_records;
+        return;
+    }
     if (file_ == nullptr) {
         return;  // stopped
     }
     if (segment_size_ + frame_size > config_.segment_bytes && segment_size_ > 512U) {
-        close_segment_locked();
-        open_segment_locked(next_sequence_);
+        try {
+            close_segment_locked();
+            open_segment_locked(next_sequence_);
+        } catch (const std::exception& exception) {
+            fail_locked(exception.what());
+            ++stats_.lost_records;
+            return;
+        }
+        if (stats_.failed) {
+            ++stats_.lost_records;
+            return;
+        }
     }
 
     ByteWriter body;
@@ -680,6 +719,7 @@ void JournalWriter::append_locked(JournalKind kind, std::int64_t wall_ns, std::s
     segment_size_ += frame_size;
     ++next_sequence_;
     ++stats_.records;
+    ++buffered_records_;
     if (buffer_.size() >= kFlushThreshold) {
         flush_locked();
     }
@@ -774,11 +814,12 @@ void JournalWriter::stop() {
     close_segment_locked();
 }
 
-void JournalWriter::sync() {
-    worker_.wait_until_drained(std::chrono::seconds(5));
+bool JournalWriter::sync() {
+    const bool drained = worker_.wait_until_drained(std::chrono::seconds(5));
     record_gap();
     std::lock_guard lock(mutex_);
     flush_locked();
+    return drained && !stats_.failed;
 }
 
 std::uint64_t JournalWriter::last_sequence() const {
@@ -865,6 +906,7 @@ bool JournalReader::refill() {
 void JournalReader::seek(std::uint64_t wanted) {
     refresh_segments();
     seek_target_ = wanted;
+    previous_sequence_ = 0;
     open_ = false;
     corrupt_ = false;
     error_.clear();
@@ -892,6 +934,10 @@ std::optional<JournalRecord> JournalReader::next() {
                 if (frame.record.sequence < seek_target_) {
                     continue;
                 }
+                if (previous_sequence_ != 0U && frame.record.sequence > previous_sequence_ + 1U) {
+                    missing_ += frame.record.sequence - previous_sequence_ - 1U;
+                }
+                previous_sequence_ = frame.record.sequence;
                 return frame.record;
             case FrameStatus::incomplete:
                 if (refill()) {
@@ -952,6 +998,8 @@ void write_manifest(const fs::path& directory, const SessionManifest& manifest) 
     if (!out) {
         throw JournalError("cannot write session manifest in " + directory.string());
     }
+    // Round-trip precision: a replay in another process must trade the same quantities.
+    out.precision(std::numeric_limits<double>::max_digits10);
     out << "session " << manifest.session << '\n';
     for (const auto& feed : manifest.feeds) {
         out << "feed " << feed.name;

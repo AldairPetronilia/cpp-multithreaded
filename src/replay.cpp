@@ -1,6 +1,8 @@
 #include "trading/replay.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <deque>
 #include <iostream>
 #include <stdexcept>
 
@@ -157,8 +159,7 @@ ReplayProgress ReplayFeed::progress() const {
     progress.gap_events = gap_events_.load(std::memory_order_relaxed);
     progress.seeked = seeked_.load(std::memory_order_relaxed);
     progress.span_s = static_cast<double>(last_wall_ns_ - first_wall_ns_) / 1e9;
-    progress.position_s =
-        std::max(0.0, static_cast<double>(position_wall_ns_.load(std::memory_order_relaxed) - first_wall_ns_) / 1e9);
+    progress.position_s = position_s();
     const auto frozen = finished_after_ns_.load(std::memory_order_relaxed);
     progress.elapsed_s =
         !started_.load(std::memory_order_acquire)
@@ -223,23 +224,64 @@ ReplayFeed::Pace ReplayFeed::pace(std::stop_token stop, const JournalRecord& rec
     }
 }
 
+bool ReplayFeed::wait_for_seek(std::stop_token stop) {
+    std::unique_lock lock(mutex_);
+    wakeup_.wait(lock, stop, [this] { return seek_pending_; });
+    return !stop.stop_requested();
+}
+
+double ReplayFeed::position_s() const noexcept {
+    return std::max(0.0, static_cast<double>(position_wall_ns_.load(std::memory_order_relaxed) - first_wall_ns_) / 1e9);
+}
+
 void ReplayFeed::run(std::stop_token stop) {
     try {
         JournalReader reader(options_.directory);
         reader.seek(first_);
         PaceState pace_state;
         std::size_t since_barrier = 0;
+        std::uint64_t holes_counted = 0;
+        const auto restart = [&] {
+            std::uint64_t target = 0;
+            {
+                std::lock_guard lock(mutex_);
+                target = seek_target_;
+                seek_pending_ = false;
+            }
+            reader.seek(target);
+            pace_state.anchored = false;
+            since_barrier = 0;
+        };
 
         while (!stop.stop_requested()) {
             std::optional<JournalRecord> record = reader.next();
-            if (!record) {
-                if (reader.corrupt()) {
-                    fail(reader.error());
-                }
-                break;
+            if (reader.missing() > holes_counted) {
+                // Records missing from the journal itself count as gaps too.
+                gaps_.fetch_add(1, std::memory_order_relaxed);
+                gap_events_.fetch_add(reader.missing() - holes_counted, std::memory_order_relaxed);
+                holes_counted = reader.missing();
             }
-            if (record->sequence > last_) {
-                break;
+            if (!record || record->sequence > last_) {
+                if (!record && reader.corrupt()) {
+                    fail(reader.error());
+                    break;
+                }
+                // The end of the recording: let downstream catch up, then wait, because a
+                // seek can still take the replay back. stop() ends the wait.
+                if (barrier_) {
+                    barrier_();
+                }
+                finished_after_ns_.store(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at_).count(),
+                    std::memory_order_relaxed);
+                finished_.store(true, std::memory_order_release);
+                if (!wait_for_seek(stop)) {
+                    break;
+                }
+                finished_.store(false, std::memory_order_release);
+                finished_after_ns_.store(0, std::memory_order_relaxed);
+                restart();
+                continue;
             }
             current_sequence_.store(record->sequence, std::memory_order_relaxed);
             position_wall_ns_.store(std::max(record->wall_ns, position_wall_ns_.load(std::memory_order_relaxed)),
@@ -260,15 +302,7 @@ void ReplayFeed::run(std::stop_token stop) {
                 break;
             }
             if (pace_result == Pace::restart) {
-                std::uint64_t target = 0;
-                {
-                    std::lock_guard lock(mutex_);
-                    target = seek_target_;
-                    seek_pending_ = false;
-                }
-                reader.seek(target);
-                pace_state.anchored = false;
-                since_barrier = 0;
+                restart();
                 continue;
             }
 
@@ -288,19 +322,15 @@ void ReplayFeed::run(std::stop_token stop) {
                 barrier_();
             }
         }
-        if (barrier_ && !stop.stop_requested()) {
-            barrier_();
-        }
     } catch (const std::exception& exception) {
         fail(exception.what());
     } catch (...) {
         fail("unknown exception");
     }
-    finished_after_ns_.store(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at_).count(),
-        std::memory_order_relaxed);
-    if (!failed_.load(std::memory_order_acquire)) {
-        finished_.store(true, std::memory_order_release);
+    if (finished_after_ns_.load(std::memory_order_relaxed) == 0) {
+        finished_after_ns_.store(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started_at_).count(),
+            std::memory_order_relaxed);
     }
 }
 
@@ -308,16 +338,32 @@ void ReplayFeed::run(std::stop_token stop) {
 
 namespace {
 
-std::string signal_key(const std::string& strategy, const std::string& symbol, std::uint64_t signal_id, Side side) {
-    std::string key = strategy;
+// The quote a signal answers, as "symbol|sequence".
+std::string quote_key(const std::string& symbol, std::uint64_t sequence) {
+    return symbol + '|' + std::to_string(sequence);
+}
+
+// Identity plus the fields an order is built from. Doubles are compared bit for bit: a
+// replay derives them from the same recorded quote, so they must be identical.
+std::string signal_key(const TradingSignalEvent& signal) {
+    std::string key = signal.strategy;
     key += '|';
-    key += symbol;
+    key += quote_key(signal.symbol, signal.signal_id);
     key += '|';
-    key += std::to_string(signal_id);
+    key += to_string(signal.side);
     key += '|';
-    key += to_string(side);
+    key += std::to_string(std::bit_cast<std::uint64_t>(signal.quantity));
+    key += '|';
+    key += std::to_string(std::bit_cast<std::uint64_t>(signal.reference_price));
     return key;
 }
+
+// A fault is detected some time after it begins (detect_ms), and the quote that tripped it
+// may have waited in the mailbox a little before that. Quotes this much earlier still count
+// as arriving during the outage.
+constexpr std::int64_t kOutageSlackNs = 100'000'000;
+// Longest a fault can go undetected (a handler hung on its last event) plus the slack.
+constexpr std::int64_t kRecentQuotesNs = 2'000'000'000;
 
 }  // namespace
 
@@ -326,28 +372,81 @@ ReplayVerifier::ReplayVerifier(EventBus& event_bus, const std::filesystem::path&
     : comparable_(comparable),
       worker_("replay-verifier", event_bus, WorkerOptions{16'384, OverflowPolicy::reject_newest, 256},
               [this](const EventEnvelope& envelope) { on_event(envelope); }) {
+    struct Quote {
+        std::int64_t wall_ns;
+        std::string key;
+    };
+    // The newest quotes, so that a fault can claim the ones that arrived before it was seen.
+    std::deque<Quote> recent;
+    // Components down at the moment: they claim every quote until they are live again.
+    std::set<std::string> down;
+    std::vector<TradingSignalEvent> signals;
+    // Per symbol, the last quote the replay will publish: signals answering later quotes are
+    // not expected, even if the recording already holds them.
+    std::unordered_map<std::string, std::uint64_t> replayed_through;
+
     JournalReader reader(directory);
     reader.seek(from);
+    const auto stamp = MonotonicClock::now();
     while (const auto record = reader.next()) {
-        if (record->sequence > to) {
-            break;
-        }
-        const auto stamp = MonotonicClock::now();
-        if (record->kind == JournalKind::trading_signal) {
-            if (const auto signal = decode_signal(*record, stamp)) {
-                expected_.insert(signal_key(signal->strategy, signal->symbol, signal->signal_id, signal->side));
-                ++expected_by_strategy_[signal->strategy];
-                ++recorded_;
+        if (record->kind == JournalKind::market_data) {
+            if (record->sequence > to) {
+                continue;
+            }
+            if (const auto quote = decode_market_data(*record, stamp)) {
+                auto& through = replayed_through[quote->symbol];
+                through = std::max(through, quote->sequence);
+                auto key = quote_key(quote->symbol, quote->sequence);
+                for (const auto& component : down) {
+                    outage_quotes_[component].insert(key);
+                }
+                recent.push_back(Quote{record->wall_ns, std::move(key)});
+                while (!recent.empty() && record->wall_ns - recent.front().wall_ns > kRecentQuotesNs) {
+                    recent.pop_front();
+                }
+            }
+        } else if (record->kind == JournalKind::trading_signal) {
+            if (auto signal = decode_signal(*record, stamp)) {
+                signals.push_back(std::move(*signal));
             }
         } else if (record->kind == JournalKind::supervision) {
             if (const auto event = decode_supervision(*record, stamp)) {
-                if (event->action == "restarted" || event->action == "quarantined") {
+                if (event->action == "fault") {
+                    const auto onset = record->wall_ns - static_cast<std::int64_t>(event->detect_ms * 1e6) - kOutageSlackNs;
+                    auto& claimed = outage_quotes_[event->component];
+                    for (const auto& quote : recent) {
+                        if (quote.wall_ns >= onset) {
+                            claimed.insert(quote.key);
+                        }
+                    }
+                    down.insert(event->component);
+                } else if (event->action == "restarted" || event->action == "live") {
+                    down.erase(event->component);
+                }
+                if (event->action == "restarted" || event->action == "rebuilding" || event->action == "quarantined") {
                     outages_.insert(event->component);
                 }
             }
         } else if (record->kind == JournalKind::gap) {
             ++journal_gaps_;
         }
+    }
+    if (reader.missing() > 0U) {
+        ++journal_gaps_;
+    }
+
+    for (const auto& signal : signals) {
+        const auto through = replayed_through.find(signal.symbol);
+        if (through == replayed_through.end() || signal.signal_id > through->second) {
+            continue;
+        }
+        auto& expected = expected_[signal_key(signal)];
+        if (expected.remaining == 0U && expected.strategy.empty()) {
+            expected.strategy = signal.strategy;
+            expected.quote = quote_key(signal.symbol, signal.signal_id);
+        }
+        ++expected.remaining;
+        ++recorded_;
     }
     worker_.subscribe<TradingSignalEvent>();
 }
@@ -371,16 +470,22 @@ void ReplayVerifier::on_event(const EventEnvelope& envelope) {
     if (signal == nullptr) {
         return;
     }
-    const auto key = signal_key(signal->strategy, signal->symbol, signal->signal_id, signal->side);
+    const auto key = signal_key(*signal);
     std::lock_guard lock(mutex_);
     ++rederived_;
-    if (expected_.contains(key)) {
+    const auto found = expected_.find(key);
+    if (found != expected_.end() && found->second.remaining > 0U) {
+        --found->second.remaining;
         ++matched_;
-        ++matched_by_strategy_[signal->strategy];
     } else {
         ++extra_;
-        ++extra_by_strategy_[signal->strategy];
+        extras_.push_back(Extra{signal->strategy, quote_key(signal->symbol, signal->signal_id)});
     }
+}
+
+bool ReplayVerifier::explains(const std::string& strategy, const std::string& quote) const {
+    const auto found = outage_quotes_.find(strategy);
+    return found != outage_quotes_.end() && found->second.contains(quote);
 }
 
 VerificationReport ReplayVerifier::report(bool complete) const {
@@ -397,26 +502,19 @@ VerificationReport ReplayVerifier::report(bool complete) const {
 
     // Absences are only final once the replay has finished; until then "missing" is just
     // "not seen yet".
-    std::uint64_t missing = 0;
-    std::uint64_t explained = 0;
-    for (const auto& [strategy, count] : expected_by_strategy_) {
-        const auto matched = matched_by_strategy_.contains(strategy) ? matched_by_strategy_.at(strategy) : 0U;
-        const auto absent = count - std::min(count, matched);
-        missing += absent;
-        if (complete && outages_.contains(strategy)) {
-            explained += absent;
-        }
-    }
     if (complete) {
-        for (const auto& [strategy, count] : extra_by_strategy_) {
-            if (outages_.contains(strategy)) {
-                explained += count;
+        for (const auto& [key, expected] : expected_) {
+            static_cast<void>(key);
+            report.missing += expected.remaining;
+            if (expected.remaining > 0U && explains(expected.strategy, expected.quote)) {
+                report.explained += expected.remaining;
             }
         }
-        report.missing = missing;
-        report.explained = explained;
-    } else {
-        report.missing = 0;
+        for (const auto& extra : extras_) {
+            if (explains(extra.strategy, extra.quote)) {
+                ++report.explained;
+            }
+        }
     }
 
     report.note = note_;
@@ -431,11 +529,11 @@ VerificationReport ReplayVerifier::report(bool complete) const {
         report.verdict = "match";
     } else if (report.missing + report.extra == report.explained) {
         report.verdict = "explained";
-        report.note = "every difference is on a strategy that was restarted during the recording";
+        report.note = "every difference is on a quote that arrived while its strategy was being restarted";
     } else {
         report.verdict = "diverged";
         if (journal_gaps_ > 0U) {
-            report.note = "the journal has gaps (events lost to tap overflow), so a re-derivation cannot be exact";
+            report.note = "the journal has gaps (events lost while recording), so a re-derivation cannot be exact";
         } else {
             report.note = "the live strategies saw a different input than the journal holds (shedding under load?)";
         }

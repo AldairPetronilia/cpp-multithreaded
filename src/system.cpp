@@ -176,18 +176,25 @@ TradingSystem::TradingSystem(SystemConfig config)
     }
 
     mock_api_ = std::make_shared<MockTradingApi>(config_.mock_api);
+    auto member_config = config_.api_manager;
+    // With somewhere else to go, a dropped connection fails over at once instead of
+    // retrying the broken path (and spending its rate limit) first.
+    member_config.retry_connection_failures = config_.gateways.count == 1U;
     std::vector<GatewayPool::Member> members;
     for (std::size_t index = 0; index < config_.gateways.count; ++index) {
         auto fault = std::make_shared<FaultableApiClient>(mock_api_);
         members.push_back(GatewayPool::Member{
             "gateway-" + std::to_string(index + 1U),
-            std::make_shared<ApiRequestManager>(fault, config_.api_manager),
+            std::make_shared<ApiRequestManager>(fault, member_config),
             fault,
         });
     }
     gateway_ = std::make_unique<GatewayPool>(std::move(members), config_.gateways.pool, 42);
 
-    const ComponentContext context{bus_, graveyard_, config_.supervision.config, journal_.get()};
+    if (config_.supervision.enabled) {
+        doorbell_ = std::make_shared<Doorbell>();
+    }
+    const ComponentContext context{bus_, graveyard_, config_.supervision.config, journal_.get(), doorbell_};
     position_monitor_ = std::make_unique<PositionComponent>(context, positions_, config_.position_monitor);
 
     // A playback shows what was recorded, signals and fills included, so nothing here may
@@ -202,11 +209,20 @@ TradingSystem::TradingSystem(SystemConfig config)
         }
     }
     if (config_.record_activity) {
-        activity_ = std::make_unique<ActivityRecorder>(bus_, config_.activity, epoch_);
+        std::function<double()> timeline;
+        if (replaying) {
+            timeline = [this] { return replay_feed_->position_s(); };
+        }
+        activity_ = std::make_unique<ActivityRecorder>(bus_, config_.activity, epoch_, std::move(timeline));
     }
 
     if (replaying) {
-        replay_feed_ = std::make_unique<ReplayFeed>(bus_, *config_.replay, [this] { wait_for_downstream(); });
+        auto options = *config_.replay;
+        // Lockstep waits after every batch, so a batch must fit in a strategy's mailbox or
+        // quotes would be shed between waits.
+        options.lockstep_batch =
+            std::max<std::size_t>(1U, std::min(options.lockstep_batch, config_.strategy_worker.mailbox_capacity));
+        replay_feed_ = std::make_unique<ReplayFeed>(bus_, std::move(options), [this] { wait_for_downstream(); });
         if (config_.replay->mode == ReplayMode::rederive) {
             const auto bounds = JournalReader::bounds(config_.replay->directory);
             verifier_ = std::make_unique<ReplayVerifier>(bus_, config_.replay->directory, replay_feed_->first_sequence(),
@@ -220,7 +236,7 @@ TradingSystem::TradingSystem(SystemConfig config)
     }
 
     if (config_.supervision.enabled) {
-        supervisor_ = std::make_unique<Supervisor>(bus_, graveyard_, config_.supervision.config, epoch_);
+        supervisor_ = std::make_unique<Supervisor>(bus_, graveyard_, config_.supervision.config, epoch_, doorbell_);
         for (auto* component : components()) {
             supervisor_->add(*component);
         }
@@ -289,6 +305,18 @@ void TradingSystem::wait_for_downstream() {
     if (execution_) {
         execution_->wait_until_drained(limit);
     }
+    // Last: a playback publishes its recorded fills straight to the position monitor.
+    position_monitor_->wait_until_drained(limit);
+}
+
+bool TradingSystem::drain_strategies(std::chrono::milliseconds timeout) {
+    const auto deadline = MonotonicClock::now() + timeout;
+    bool drained = true;
+    for (auto& strategy : strategies_) {
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - MonotonicClock::now());
+        drained = strategy->wait_until_drained(std::max(left, std::chrono::milliseconds(0))) && drained;
+    }
+    return drained;
 }
 
 void TradingSystem::start() {
@@ -395,6 +423,7 @@ bool TradingSystem::feeds_finished() const {
 SystemSnapshot TradingSystem::snapshot() const {
     SystemSnapshot snapshot;
     snapshot.uptime_s = std::chrono::duration<double>(MonotonicClock::now() - epoch_).count();
+    snapshot.timeline_s = replay_feed_ ? replay_feed_->position_s() : snapshot.uptime_s;
     snapshot.running = state_.load() == State::running;
     snapshot.mode = config_.replay ? "replay" : "live";
     snapshot.session = session_;

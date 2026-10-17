@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <stdexcept>
+#include <stop_token>
 
 namespace trading {
 
@@ -43,6 +45,19 @@ struct GatewayPool::Operation {
     ApiRequest request;
     ApiCompletion completion;
     std::size_t reroutes{0};
+    // The handle the caller holds is the first attempt's. Once the request moves to another
+    // gateway, cancelling that handle has to cancel the attempt standing in for it.
+    RequestHandle caller;
+    RequestHandle current;
+    std::unique_ptr<std::stop_callback<std::function<void()>>> forward_cancel;
+
+    // Call with the pool's mutex held, once both handles are known.
+    void link_cancellation() {
+        if (caller.valid() && current.valid()) {
+            forward_cancel = std::make_unique<std::stop_callback<std::function<void()>>>(
+                caller.token(), [attempt = current] { attempt.cancel(); });
+        }
+    }
 };
 
 GatewayPool::GatewayPool(std::vector<Member> members, GatewayPoolConfig config, std::uint64_t jitter_seed)
@@ -113,17 +128,23 @@ std::optional<GatewayPool::Choice> GatewayPool::choose_locked(std::uint32_t excl
         }
     }
 
-    std::vector<std::size_t> closed;
+    // The first closed gateway, or with spreading the next one round the closed ones.
+    std::size_t closed = 0;
     for (std::size_t index = 0; index < breakers_.size(); ++index) {
         if (allowed(index) && breakers_[index].state == GatewayState::closed) {
-            closed.push_back(index);
+            if (!config_.spread) {
+                return Choice{index, false};
+            }
+            ++closed;
         }
     }
-    if (!closed.empty()) {
-        if (!config_.spread) {
-            return Choice{closed.front(), false};
+    if (closed > 0U) {
+        auto skip = round_robin_++ % closed;
+        for (std::size_t index = 0; index < breakers_.size(); ++index) {
+            if (allowed(index) && breakers_[index].state == GatewayState::closed && skip-- == 0U) {
+                return Choice{index, false};
+            }
         }
-        return Choice{closed[round_robin_++ % closed.size()], false};
     }
 
     // Nothing is closed. Fail static: use the gateway that will reopen soonest rather than
@@ -221,7 +242,16 @@ SubmitResult GatewayPool::submit(ApiRequest request, ApiCompletion completion) {
         std::lock_guard lock(mutex_);
         budget_ = std::min(config_.retry_budget_cap, budget_ + config_.retry_budget_ratio);
     }
-    return dispatch(operation, 0U);
+    auto result = dispatch(operation, 0U);
+    if (result.accepted()) {
+        // The first attempt may already have moved on by now; link whichever comes second.
+        std::lock_guard lock(mutex_);
+        operation->caller = result.handle;
+        if (operation->reroutes > 0U) {
+            operation->link_cancellation();
+        }
+    }
+    return result;
 }
 
 SubmitResult GatewayPool::dispatch(const std::shared_ptr<Operation>& operation, std::uint32_t excluded) {
@@ -265,10 +295,15 @@ void GatewayPool::attempt_done(const std::shared_ptr<Operation>& operation, std:
                                ApiResponse response) {
     const auto outcome = classify(response);
     std::optional<std::uint32_t> reroute_excluding;
+    // Only a request the broker can deduplicate may be sent again: a timeout or a dropped
+    // connection does not say whether the first attempt executed.
+    const bool safe_to_resend = operation->request.idempotent && !operation->request.idempotency_key.empty();
     {
         std::lock_guard lock(mutex_);
         record_locked(member, outcome, probe);
-        if (outcome == Outcome::hard_failure && operation->reroutes < config_.max_reroutes) {
+        const bool cancelled = operation->caller.valid() && operation->caller.token().stop_requested();
+        if (outcome == Outcome::hard_failure && safe_to_resend && !cancelled &&
+            operation->reroutes < config_.max_reroutes) {
             // A failed probe is the pool's own experiment and costs the order nothing. Any
             // other re-route is paid for from the pool-wide budget.
             if (probe || budget_ >= 1.0) {
@@ -282,12 +317,17 @@ void GatewayPool::attempt_done(const std::shared_ptr<Operation>& operation, std:
         }
     }
     if (reroute_excluding) {
-        ++operation->reroutes;
+        {
+            std::lock_guard lock(mutex_);
+            ++operation->reroutes;
+        }
         const auto moved = dispatch(operation, *reroute_excluding);
         if (moved.accepted()) {
             std::lock_guard lock(mutex_);
             ++reroutes_;
             ++breakers_[member].rerouted_away;
+            operation->current = moved.handle;
+            operation->link_cancellation();
             return;
         }
     }

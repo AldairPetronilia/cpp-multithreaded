@@ -5,6 +5,7 @@
 #include "check.hpp"
 #include "trading/api.hpp"
 #include "trading/components.hpp"
+#include "trading/config.hpp"
 #include "trading/fencing.hpp"
 #include "trading/gateway_pool.hpp"
 #include "trading/journal.hpp"
@@ -263,9 +264,9 @@ void journal_round_trips_every_event_type_and_resumes_its_sequence() {
                                                   .market_data_time = now - 5ms,
                                                   .execution_time = now,
                                                   .api_service_time = 4ms});
-        bus.publish(trading::SupervisionEvent{"alpha", "restarted", "caught up", 2, 12.5, now});
+        bus.publish(trading::SupervisionEvent{"alpha", "restarted", "caught up", 2, 3.5, 12.5, now});
         // Readable while the writer is still open.
-        journal.sync();
+        CHECK(journal.sync());
         CHECK(read_all(session).size() == 4U);
         journal.stop();
     }
@@ -289,6 +290,7 @@ void journal_round_trips_every_event_type_and_resumes_its_sequence() {
     CHECK(report->message == "simulated order filled" && report->api_service_time == 4ms);
     const auto event = trading::decode_supervision(records[3], stamp);
     CHECK(event && event->component == "alpha" && event->action == "restarted" && event->generation == 2U);
+    CHECK(event->detect_ms == 3.5 && event->recovery_ms == 12.5);
 
     // Reopening the session continues its sequence instead of starting over.
     {
@@ -296,7 +298,7 @@ void journal_round_trips_every_event_type_and_resumes_its_sequence() {
         trading::JournalWriter journal(bus, config);
         journal.start();
         bus.publish(make_quote("MSFT", 300.0, 1), bus.topic("MSFT"));
-        journal.sync();
+        CHECK(journal.sync());
         CHECK(journal.stats().last_sequence == 5U);
         journal.stop();
     }
@@ -317,7 +319,7 @@ void journal_repairs_a_torn_tail_and_sets_aside_a_damaged_segment() {
         for (std::uint64_t index = 1; index <= count; ++index) {
             bus.publish(make_quote("AAPL", 100.0 + static_cast<double>(index), index), topic);
         }
-        journal.sync();
+        CHECK(journal.sync());
         journal.stop();
     };
     const auto segment = [](const fs::path& directory) {
@@ -345,7 +347,7 @@ void journal_repairs_a_torn_tail_and_sets_aside_a_damaged_segment() {
         CHECK(stats.quarantined_segments == 0U);
         journal.start();
         bus.publish(make_quote("AAPL", 1.0, 10), bus.topic("AAPL"));
-        journal.sync();
+        CHECK(journal.sync());
         journal.stop();
     }
     auto records = read_all(torn);
@@ -370,7 +372,7 @@ void journal_repairs_a_torn_tail_and_sets_aside_a_damaged_segment() {
         CHECK(journal.stats().quarantined_segments == 1U);
         journal.start();
         bus.publish(make_quote("AAPL", 1.0, 31), bus.topic("AAPL"));
-        journal.sync();
+        CHECK(journal.sync());
         journal.stop();
     }
     std::size_t set_aside = 0;
@@ -396,7 +398,7 @@ void journal_rolls_segments_and_seeks_by_sequence() {
         for (std::uint64_t index = 1; index <= 400; ++index) {
             bus.publish(make_quote("AAPL", 100.0, index), topic);
         }
-        journal.sync();
+        CHECK(journal.sync());
         CHECK(journal.stats().segments > 3U);
         journal.stop();
     }
@@ -589,25 +591,64 @@ void stall_detector_tells_idle_from_stuck() {
     health.ready = true;
     health.processed = 5;
 
-    // Idle: nothing waiting, nothing completing, forever. Not a fault.
+    // Idle: nothing waiting, no handler running, nothing completing, forever. Not a fault.
     health.backlog = 0;
-    CHECK(!detector.observe(health, 20ms));
+    CHECK(detector.observe(health) == 0ms);
     std::this_thread::sleep_for(40ms);
-    CHECK(!detector.observe(health, 20ms));
+    CHECK(detector.observe(health) == 0ms);
 
     // Stuck: work is waiting and nothing completes.
     health.backlog = 3;
-    CHECK(!detector.observe(health, 20ms));
+    CHECK(detector.observe(health) == 0ms);
     std::this_thread::sleep_for(40ms);
-    const auto stalled = detector.observe(health, 20ms);
-    CHECK(stalled && *stalled >= 20ms);
+    CHECK(detector.observe(health) >= 40ms);
 
     // Slow but alive: work is waiting and the count keeps moving.
     health.processed = 6;
-    CHECK(!detector.observe(health, 20ms));
+    CHECK(detector.observe(health) == 0ms);
     std::this_thread::sleep_for(40ms);
     health.processed = 7;
-    CHECK(!detector.observe(health, 20ms));
+    CHECK(detector.observe(health) == 0ms);
+
+    // Hung on its last event: nothing queued behind it, but a handler is running and
+    // nothing completes. An empty mailbox must not hide that.
+    health.backlog = 0;
+    health.handler_running_for = 1ms;
+    CHECK(detector.observe(health) == 0ms);
+    std::this_thread::sleep_for(40ms);
+    health.handler_running_for = 41ms;
+    CHECK(detector.observe(health) >= 40ms);
+
+    // Still rebuilding its state: working, never stalled.
+    health.ready = false;
+    CHECK(detector.observe(health) == 0ms);
+}
+
+void a_worker_hung_on_its_last_event_is_stalled_not_ignored() {
+    trading::SupervisorConfig config;
+    config.stall_timeout = 40ms;
+    config.handler_deadline = 80ms;
+    trading::StallDetector detector;
+    trading::WorkerHealth health;
+    health.ready = true;
+    health.handler_running_for = 1ms;
+    CHECK(trading::evaluate_worker(health, detector, config).verdict == trading::ProbeResult::Verdict::ok);
+    std::this_thread::sleep_for(50ms);
+    // Past half the handler deadline: a warning first.
+    auto probe = trading::evaluate_worker(health, detector, config);
+    CHECK(probe.verdict == trading::ProbeResult::Verdict::degraded);
+    CHECK(probe.state == trading::ComponentState::degraded);
+    std::this_thread::sleep_for(40ms);
+    probe = trading::evaluate_worker(health, detector, config);
+    CHECK(probe.verdict == trading::ProbeResult::Verdict::fault);
+    CHECK(probe.state == trading::ComponentState::stalled);
+    CHECK(probe.observed_ms >= 80.0);
+
+    // A replacement that is still rebuilding its state shows as restarting, not as stuck.
+    trading::StallDetector fresh;
+    trading::WorkerHealth rebuilding;
+    rebuilding.backlog = 500;
+    CHECK(trading::evaluate_worker(rebuilding, fresh, config).state == trading::ComponentState::restarting);
 }
 
 // --- Order recovery ------------------------------------------------------------------------
@@ -919,7 +960,8 @@ void a_crashed_strategy_is_replaced_and_rebuilds_its_state_from_the_journal() {
     const auto before = fx_processed();
     CHECK(eventually([&] { return fx_processed() > before + 500U; }, 3s));
     for (const auto& other : {std::string("trend-tech"), std::string("levels")}) {
-        const auto* status = find_component(system.snapshot(), other);
+        const auto current = system.snapshot();
+        const auto* status = find_component(current, other);
         CHECK(status != nullptr && status->restarts == 0U);
     }
     system.stop();
@@ -1028,7 +1070,8 @@ void a_component_that_keeps_crashing_is_quarantined_not_restarted_forever() {
         CHECK(system.inject_fault("trend-fx", trading::Fault::crash));
         CHECK(eventually(
             [&] {
-                const auto* component = find_component(system.snapshot(), "trend-fx");
+                const auto current = system.snapshot();
+                const auto* component = find_component(current, "trend-fx");
                 return component->restarts >= round || component->state == trading::ComponentState::quarantined;
             },
             5s));
@@ -1306,6 +1349,360 @@ void telemetry_describes_resilience_journal_gateways_and_replay() {
 
 }  // namespace
 
+// --- Regressions from review ---------------------------------------------------------------
+
+void position_recovery_never_counts_an_old_fill_twice() {
+    TempDir dir;
+    trading::EventBus bus;
+    trading::JournalConfig config;
+    config.directory = dir.path() / "fills";
+    config.session = "fills";
+    config.fsync_interval = 0ms;
+    trading::JournalWriter journal(bus, config);
+    journal.start();
+    trading::PositionBook book;
+    // More distinct fills than the book remembers, and the newest few reached the journal
+    // but not the book: the monitor died before applying them.
+    const std::uint64_t total = trading::PositionBook::kDedupeWindow + 4'000;
+    const std::uint64_t missed = 3;
+    const auto now = trading::MonotonicClock::now();
+    for (std::uint64_t index = 1; index <= total; ++index) {
+        trading::ExecutionReportEvent fill{.strategy = "alpha",
+                                           .signal_id = index,
+                                           .client_order_id = "f:" + std::to_string(index),
+                                           .symbol = "AAPL",
+                                           .side = trading::Side::buy,
+                                           .quantity = 1.0,
+                                           .fill_price = 100.0,
+                                           .filled = true,
+                                           .market_data_time = now,
+                                           .execution_time = now};
+        if (index <= total - missed) {
+            book.apply(fill);
+        }
+        bus.publish(std::move(fill));
+        if (index % 16'384U == 0U) {
+            CHECK(journal.sync());  // keeps the tap from overflowing
+        }
+    }
+    CHECK(journal.sync());
+    CHECK(journal.stats().gaps == 0U);
+
+    trading::reapply_recent_reports(journal, book);
+    // Exactly the missed fills were added; nothing older was applied a second time.
+    CHECK(book.position("alpha", "AAPL") == static_cast<double>(total));
+    CHECK(book.fills_applied() == total);
+    journal.stop();
+}
+
+void a_replacement_that_cannot_rebuild_its_state_dies_instead_of_going_live() {
+    trading::EventBus bus;
+    std::atomic<int> handled{0};
+    std::atomic<int> rang{0};
+    trading::EventWorker worker("rebuilding", bus, {}, [&](const trading::EventEnvelope&) { ++handled; });
+    worker.subscribe<trading::MarketDataEvent>();
+    worker.set_start_hook([] { throw trading::JournalError("journal damaged during recovery"); });
+    worker.set_crash_hook([&] { ++rang; });
+    worker.start();
+    CHECK(worker.wait_ready(2s));  // returns once the worker has ended, ready or not
+    bus.publish(make_quote("AAPL", 1.0, 1));
+    const auto health = worker.health();
+    CHECK(health.crashed && !health.ready);
+    CHECK(health.error.find("state recovery failed") != std::string::npos);
+    CHECK(eventually([&] { return rang.load() == 1; }, 1s));
+    CHECK(handled.load() == 0);
+    worker.stop();
+}
+
+void a_crash_wakes_the_supervisor_without_waiting_for_a_probe() {
+    TempDir dir;
+    auto config = resilient_config(dir.path());
+    // Probes far apart: only the doorbell can explain a fast reaction.
+    auto& supervision = config.supervision.config;
+    supervision.probe_interval = 2'000ms;
+    supervision.stall_timeout = 4'000ms;
+    supervision.handler_deadline = 4'000ms;
+    trading::TradingSystem system(config);
+    system.start();
+    CHECK(eventually([&] { return system.snapshot().journal->records > 1500U; }, 5s));
+    CHECK(system.inject_fault("trend-fx", trading::Fault::crash));
+    CHECK(eventually([&] { return restarted(system, "trend-fx", 1); }, 1'000ms));
+    const auto snapshot = system.snapshot();
+    const auto* component = find_component(snapshot, "trend-fx");
+    CHECK(component != nullptr && component->last_detect_ms < 500.0);
+    system.stop();
+}
+
+void a_hung_position_monitor_cannot_touch_the_book_when_it_wakes() {
+    TempDir dir;
+    trading::TradingSystem system(resilient_config(dir.path()));
+    system.start();
+    CHECK(eventually([&] { return system.snapshot().journal->records > 2000U; }, 5s));
+    // It hangs on the next fill it handles, and wakes long after it has been replaced.
+    CHECK(system.inject_fault("position-monitor", trading::Fault::hang, 1'500ms));
+    CHECK(eventually([&] { return restarted(system, "position-monitor", 1); }, 10s));
+    CHECK(eventually([&] { return system.snapshot().supervisor.zombies == 0U; }, 5s));
+    const auto snapshot = system.snapshot();
+    const auto* component = find_component(snapshot, "position-monitor");
+    CHECK(component != nullptr && component->fenced_writes >= 1U);
+    system.stop();
+    // The fill the stale monitor was holding was applied once, by its replacement.
+    const auto final_state = system.snapshot();
+    std::uint64_t fills = 0;
+    for (const auto& position : final_state.positions) {
+        fills += position.fills;
+    }
+    CHECK(fills == total_signals(final_state));
+}
+
+trading::GatewayPool::Member pool_member(const std::string& name, std::shared_ptr<trading::IApiClient> broker,
+                                         trading::ApiManagerConfig config) {
+    auto fault = std::make_shared<trading::FaultableApiClient>(std::move(broker));
+    return {name, std::make_shared<trading::ApiRequestManager>(fault, config), fault};
+}
+
+void the_pool_only_resends_what_the_broker_can_deduplicate() {
+    Completions done;
+    auto fixture = make_pool();
+    auto& pool = *fixture.pool;
+    pool.set_down(0, true);
+    auto request = order("not-idempotent");
+    request.idempotent = false;
+    CHECK(pool.submit(std::move(request), done.callback()).accepted());
+    CHECK(done.wait_for(1, 2s));
+    // The first attempt may have executed, so it fails rather than go out a second time.
+    CHECK(!done.responses().front().ok());
+    CHECK(pool.pool_stats().reroutes == 0U);
+    CHECK(fixture.broker->invocation_count() == 0U);
+}
+
+void cancelling_a_rerouted_order_cancels_the_attempt_standing_in_for_it() {
+    Completions done;
+    trading::MockApiConfig mock_config;
+    mock_config.latency = 300ms;
+    auto broker = std::make_shared<trading::MockTradingApi>(mock_config);
+    auto single_thread = quick_gateway();
+    single_thread.io_threads = 1;
+    std::vector<trading::GatewayPool::Member> members{pool_member("gateway-1", broker, quick_gateway()),
+                                                      pool_member("gateway-2", broker, single_thread)};
+    auto second = members[1].manager;
+    trading::GatewayPool pool(std::move(members), trading::GatewayPoolConfig{});
+    pool.set_down(0, true);
+    // Keep gateway-2's only I/O thread busy, so the re-routed order waits in its queue.
+    CHECK(second->submit(order("blocker"), done.callback()).accepted());
+    CHECK(eventually([&] { return broker->invocation_count() == 1U; }, 1s));
+    const auto handle = pool.submit(order("rerouted"), done.callback()).handle;
+    CHECK(eventually([&] { return pool.pool_stats().reroutes == 1U; }, 1s));
+    handle.cancel();
+    CHECK(done.wait_for(2, 3s));
+    const auto responses = done.responses();
+    const auto cancelled = std::count_if(responses.begin(), responses.end(), [](const trading::ApiResponse& response) {
+        return response.error == trading::ApiError::cancelled;
+    });
+    CHECK(cancelled == 1);
+    CHECK(broker->invocation_count() == 1U);  // the re-routed order never reached the broker
+    pool.shutdown();
+}
+
+void a_dropped_connection_fails_over_at_once() {
+    Completions done;
+    trading::MockApiConfig mock_config;
+    mock_config.latency = 1ms;
+    auto broker = std::make_shared<trading::MockTradingApi>(mock_config);
+    auto config = quick_gateway();
+    // Retries would be slow and visible: the dead path must not be retried at all.
+    config.max_retries = 3;
+    config.initial_retry_backoff = 300ms;
+    config.max_retry_backoff = 300ms;
+    config.retry_connection_failures = false;
+    std::vector<trading::GatewayPool::Member> members{pool_member("gateway-1", broker, config),
+                                                      pool_member("gateway-2", broker, config)};
+    auto first = members[0].manager;
+    trading::GatewayPool pool(std::move(members), trading::GatewayPoolConfig{});
+    pool.set_down(0, true);
+    const auto started = trading::MonotonicClock::now();
+    CHECK(pool.submit(order("fast-failover"), done.callback()).accepted());
+    CHECK(done.wait_for(1, 2s));
+    CHECK(done.responses().front().ok());
+    CHECK(trading::MonotonicClock::now() - started < 200ms);
+    CHECK(first->stats().retries == 0U);
+    pool.shutdown();
+}
+
+void the_reader_reports_records_missing_from_the_journal() {
+    TempDir dir;
+    trading::JournalConfig config;
+    config.directory = dir.path() / "holes";
+    config.session = "holes";
+    config.segment_bytes = 4096;
+    {
+        trading::EventBus bus;
+        trading::JournalWriter journal(bus, config);
+        journal.start();
+        const auto topic = bus.topic("AAPL");
+        for (std::uint64_t index = 1; index <= 300; ++index) {
+            bus.publish(make_quote("AAPL", 100.0, index), topic);
+        }
+        CHECK(journal.sync());
+        journal.stop();
+    }
+    std::vector<fs::path> segments;
+    for (const auto& entry : fs::directory_iterator(config.directory)) {
+        if (entry.path().extension() == ".jnl") {
+            segments.push_back(entry.path());
+        }
+    }
+    std::sort(segments.begin(), segments.end());
+    CHECK(segments.size() > 3U);
+    fs::remove(segments[1]);  // as if it had been set aside as damaged
+
+    trading::JournalReader reader(config.directory);
+    std::uint64_t read = 0;
+    while (reader.next()) {
+        ++read;
+    }
+    CHECK(!reader.corrupt());
+    CHECK(reader.missing() > 0U);
+    CHECK(read + reader.missing() == 300U);
+}
+
+trading::VerificationReport verify_against(const fs::path& directory,
+                                           const std::vector<trading::TradingSignalEvent>& derived) {
+    const auto bounds = trading::JournalReader::bounds(directory);
+    trading::EventBus bus;
+    trading::ReplayVerifier verifier(bus, directory, bounds.first, bounds.last, true);
+    verifier.start();
+    for (auto signal : derived) {
+        bus.publish(std::move(signal));
+    }
+    CHECK(verifier.wait_until_drained(2s));
+    auto report = verifier.report(true);
+    verifier.stop();
+    return report;
+}
+
+void verification_counts_every_signal_and_compares_order_fields() {
+    TempDir dir;
+    trading::JournalConfig config;
+    config.directory = dir.path() / "verify";
+    config.session = "verify";
+    {
+        trading::EventBus bus;
+        trading::JournalWriter journal(bus, config);
+        journal.start();
+        const auto topic = bus.topic("AAPL");
+        for (std::uint64_t sequence = 1; sequence <= 3; ++sequence) {
+            bus.publish(make_quote("AAPL", 100.0, sequence), topic);
+        }
+        bus.publish(make_signal("alpha", "AAPL", 1));
+        bus.publish(make_signal("alpha", "AAPL", 2));
+        CHECK(journal.sync());
+        journal.stop();
+    }
+    auto report = verify_against(config.directory, {make_signal("alpha", "AAPL", 1), make_signal("alpha", "AAPL", 2)});
+    CHECK(report.verdict == "match" && report.matched == 2U);
+
+    // The same signal twice cannot stand in for one that is missing.
+    report = verify_against(config.directory, {make_signal("alpha", "AAPL", 1), make_signal("alpha", "AAPL", 1)});
+    CHECK(report.verdict == "diverged");
+    CHECK(report.matched == 1U && report.missing == 1U && report.extra == 1U);
+
+    // Same identity, different quantity: a different order, so not a match.
+    auto bigger = make_signal("alpha", "AAPL", 2);
+    bigger.quantity = 3.0;
+    report = verify_against(config.directory, {make_signal("alpha", "AAPL", 1), bigger});
+    CHECK(report.verdict == "diverged" && report.missing == 1U && report.extra == 1U);
+
+    // A signal answering a quote past the end of the replayed range is not expected.
+    report = verify_against(config.directory,
+                            {make_signal("alpha", "AAPL", 1), make_signal("alpha", "AAPL", 2), make_signal("alpha", "AAPL", 9)});
+    CHECK(report.extra == 1U && report.recorded == 2U);
+}
+
+void only_differences_inside_an_outage_are_explained() {
+    TempDir dir;
+    trading::JournalConfig config;
+    config.directory = dir.path() / "outage";
+    config.session = "outage";
+    {
+        trading::EventBus bus;
+        trading::JournalWriter journal(bus, config);
+        journal.start();
+        const auto topic = bus.topic("AAPL");
+        const auto now = trading::MonotonicClock::now();
+        bus.publish(make_quote("AAPL", 100.0, 1), topic);  // well before the fault
+        std::this_thread::sleep_for(300ms);
+        bus.publish(trading::SupervisionEvent{"alpha", "fault", "worker thread died", 1, 0.0, 0.0, now});
+        bus.publish(make_quote("AAPL", 100.0, 2), topic);  // while alpha was down
+        bus.publish(trading::SupervisionEvent{"alpha", "restarted", "caught up", 2, 0.0, 4.0, now});
+        bus.publish(make_quote("AAPL", 100.0, 3), topic);  // after it came back
+        CHECK(journal.sync());
+        journal.stop();
+    }
+    auto report = verify_against(config.directory, {make_signal("alpha", "AAPL", 2)});
+    CHECK(report.verdict == "explained" && report.explained == 1U);
+    for (const std::uint64_t outside : {1U, 3U}) {
+        report = verify_against(config.directory, {make_signal("alpha", "AAPL", outside)});
+        CHECK(report.verdict == "diverged" && report.explained == 0U);
+    }
+}
+
+void a_finished_replay_can_still_be_moved_and_respects_small_mailboxes() {
+    TempDir dir;
+    trading::TradingSystem live(finite_config(dir.path()));
+    live.start();
+    CHECK(eventually([&] { return live.feeds_finished(); }, 20s));
+    live.stop();
+
+    trading::ReplayOptions options;
+    options.directory = live.journal_directory();
+    options.pacing = trading::ReplayPacing::lockstep;
+    auto base = live.config();
+    base.session = live.session();
+    // One-slot mailboxes: lockstep must still never shed a quote.
+    base.strategy_worker.mailbox_capacity = 1;
+    trading::TradingSystem replay(trading::SystemConfig::for_replay(base, options));
+    replay.start();
+    CHECK(eventually([&] { return replay.feeds_finished(); }, 30s));
+    auto state = replay.snapshot();
+    CHECK(state.replay->verification.verdict == "match");
+    for (const auto& strategy : state.strategies) {
+        CHECK(strategy.worker.mailbox.evicted_oldest == 0U);
+    }
+
+    // At the end the replay waits, so it can be taken back.
+    const auto first_pass = state.replay->progress.published;
+    CHECK(replay.replay_seek(0.0));
+    CHECK(eventually(
+        [&] {
+            const auto progress = replay.snapshot().replay->progress;
+            return progress.state == trading::ReplayState::finished && progress.published > first_pass;
+        },
+        30s));
+    replay.stop();
+    state = replay.snapshot();
+    CHECK(state.replay->verification.verdict == "not-comparable");
+}
+
+void a_replay_honours_an_explicit_topology_and_the_manifest_keeps_precision() {
+    const char* arguments[] = {"trading_demo", "--replay", "/nonexistent", "--feed", "custom:XYZ@10",
+                               "--strategy", "solo:threshold:XYZ"};
+    const auto config = trading::AppConfig::from_command_line(7, const_cast<char**>(arguments));
+    CHECK(config.replay);
+    CHECK(config.system.feeds.size() == 1U && config.system.feeds.front().name == "custom");
+    CHECK(config.system.strategies.size() == 1U && config.system.strategies.front().name == "solo");
+
+    TempDir dir;
+    trading::SessionManifest manifest;
+    manifest.session = "precise";
+    manifest.feeds.push_back({"fx", {{"EURUSD", 1.0853719}}});
+    manifest.strategies.push_back({"alpha", "threshold", {"EURUSD"}, 1.23456789});
+    trading::write_manifest(dir.path(), manifest);
+    const auto read = trading::read_manifest(dir.path());
+    CHECK(read && read->strategies.front().quantity == 1.23456789);
+    CHECK(read->feeds.front().instruments.front().second == 1.0853719);
+}
+
 std::vector<std::pair<std::string, std::function<void()>>> resilience_tests() {
     return {
         {"journal round trip and resume", journal_round_trips_every_event_type_and_resumes_its_sequence},
@@ -1316,6 +1713,7 @@ std::vector<std::pair<std::string, std::function<void()>>> resilience_tests() {
         {"zombie processor is fenced", a_replaced_processor_cannot_publish_when_it_wakes_up},
         {"position book idempotency", position_book_applies_each_order_once},
         {"stall detector idle vs stuck", stall_detector_tells_idle_from_stuck},
+        {"hung on the last event", a_worker_hung_on_its_last_event_is_stalled_not_ignored},
         {"gateway order lookup", gateway_lookup_reports_in_flight_and_completed_orders},
         {"execution recovery exactly once", a_restarted_execution_worker_sends_every_missed_order_exactly_once},
         {"recovery reconciles with broker", recovery_asks_the_broker_before_it_resubmits},
@@ -1338,5 +1736,17 @@ std::vector<std::pair<std::string, std::function<void()>>> resilience_tests() {
         {"session controls", the_session_routes_fault_and_replay_controls},
         {"replay needs a journal", replay_needs_a_journal},
         {"telemetry sections", telemetry_describes_resilience_journal_gateways_and_replay},
+        {"position recovery past the dedupe window", position_recovery_never_counts_an_old_fill_twice},
+        {"failed recovery dies", a_replacement_that_cannot_rebuild_its_state_dies_instead_of_going_live},
+        {"crash rings the doorbell", a_crash_wakes_the_supervisor_without_waiting_for_a_probe},
+        {"stale position monitor is fenced", a_hung_position_monitor_cannot_touch_the_book_when_it_wakes},
+        {"pool resends only idempotent requests", the_pool_only_resends_what_the_broker_can_deduplicate},
+        {"pool forwards cancellation", cancelling_a_rerouted_order_cancels_the_attempt_standing_in_for_it},
+        {"pool fails over at once", a_dropped_connection_fails_over_at_once},
+        {"reader reports missing records", the_reader_reports_records_missing_from_the_journal},
+        {"verification multiset and fields", verification_counts_every_signal_and_compares_order_fields},
+        {"outage windows explain differences", only_differences_inside_an_outage_are_explained},
+        {"replay seek after end, small mailboxes", a_finished_replay_can_still_be_moved_and_respects_small_mailboxes},
+        {"replay topology and manifest precision", a_replay_honours_an_explicit_topology_and_the_manifest_keeps_precision},
     };
 }

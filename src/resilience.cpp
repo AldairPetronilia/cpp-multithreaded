@@ -33,21 +33,17 @@ const char* to_string(ComponentState state) noexcept {
 
 // --- Health evaluation ---------------------------------------------------------------------
 
-std::optional<std::chrono::milliseconds> StallDetector::observe(const WorkerHealth& health,
-                                                                std::chrono::milliseconds timeout) {
+std::chrono::milliseconds StallDetector::observe(const WorkerHealth& health) {
     const auto now = std::chrono::steady_clock::now();
-    // Progress, or nothing to do, both mean the worker is not stuck.
-    if (!initialized_ || health.processed != last_processed_ || health.backlog == 0U) {
+    const bool work_outstanding = health.backlog > 0U || health.handler_running_for > std::chrono::nanoseconds::zero();
+    // Progress, nothing to do, or still rebuilding state: none of them is being stuck.
+    if (!initialized_ || !health.ready || !work_outstanding || health.processed != last_processed_) {
         initialized_ = true;
         last_processed_ = health.processed;
         last_progress_ = now;
-        return std::nullopt;
+        return std::chrono::milliseconds::zero();
     }
-    const auto stalled_for = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_);
-    if (stalled_for >= timeout) {
-        return stalled_for;
-    }
-    return std::nullopt;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_);
 }
 
 ProbeResult evaluate_worker(const WorkerHealth& health, StallDetector& stall, const SupervisorConfig& config) {
@@ -57,6 +53,7 @@ ProbeResult evaluate_worker(const WorkerHealth& health, StallDetector& stall, co
         result.state = ComponentState::crashed;
         result.cause = "worker thread died";
         result.error = health.error;
+        result.observed_ms = std::chrono::duration<double, std::milli>(health.crashed_for).count();
         return result;
     }
     if (health.consecutive_errors >= config.poison_threshold) {
@@ -65,25 +62,50 @@ ProbeResult evaluate_worker(const WorkerHealth& health, StallDetector& stall, co
         result.cause = std::to_string(health.consecutive_errors) + " consecutive handler failures (poison events)";
         return result;
     }
-    // A worker that is still rebuilding its state is working, not stalled.
-    if (health.ready) {
-        if (const auto stalled = stall.observe(health, config.stall_timeout)) {
-            result.verdict = ProbeResult::Verdict::fault;
-            result.state = ComponentState::stalled;
-            result.cause = "stalled: " + std::to_string(health.backlog) + " events waiting, none completed for " +
-                           std::to_string(stalled->count()) + " ms";
-            result.observed_ms = static_cast<double>(stalled->count());
-            return result;
-        }
+    const auto quiet = stall.observe(health);
+    if (!health.ready) {
+        // Rebuilding its state from the journal: working, not stalled.
+        result.state = ComponentState::restarting;
+        result.cause = "rebuilding state from the journal";
+        return result;
     }
-    if (health.handler_running_for > config.handler_deadline) {
+    // Waiting events must start moving within the stall timeout. A handler with nothing
+    // queued behind it gets the longer handler deadline before it counts as hung.
+    const bool queued = health.backlog > 0U;
+    const auto limit = queued ? config.stall_timeout : config.handler_deadline;
+    const auto waiting = queued ? std::to_string(health.backlog) + " events waiting" : std::string("one event in hand");
+    if (quiet >= limit) {
+        result.verdict = ProbeResult::Verdict::fault;
+        result.state = ComponentState::stalled;
+        result.cause = "stalled: " + waiting + ", none completed for " + std::to_string(quiet.count()) + " ms";
+        result.observed_ms = static_cast<double>(quiet.count());
+    } else if (quiet >= limit / 2) {
         result.verdict = ProbeResult::Verdict::degraded;
         result.state = ComponentState::degraded;
-        result.cause = "handler running for " +
-                       std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(health.handler_running_for).count()) +
-                       " ms";
+        result.cause = "no progress for " + std::to_string(quiet.count()) + " ms (" + waiting + ")";
+        result.observed_ms = static_cast<double>(quiet.count());
     }
     return result;
+}
+
+// --- Doorbell ------------------------------------------------------------------------------
+
+void Doorbell::ring() noexcept {
+    try {
+        {
+            std::lock_guard lock(mutex_);
+            rung_ = true;
+        }
+        wakeup_.notify_all();
+    } catch (...) {
+        // Locking failed: the next probe finds the crash anyway.
+    }
+}
+
+void Doorbell::wait(std::stop_token stop, std::chrono::milliseconds timeout) {
+    std::unique_lock lock(mutex_);
+    wakeup_.wait_for(lock, stop, timeout, [this] { return rung_; });
+    rung_ = false;
 }
 
 // --- Component base ------------------------------------------------------------------------
@@ -165,10 +187,16 @@ std::size_t Graveyard::zombies() const {
 
 // --- Supervisor ----------------------------------------------------------------------------
 
-Supervisor::Supervisor(EventBus& event_bus, Graveyard& graveyard, SupervisorConfig config, TimePoint epoch)
-    : event_bus_(event_bus), graveyard_(graveyard), config_(config), epoch_(epoch) {
+Supervisor::Supervisor(EventBus& event_bus, Graveyard& graveyard, SupervisorConfig config, TimePoint epoch,
+                       std::shared_ptr<Doorbell> doorbell)
+    : event_bus_(event_bus),
+      graveyard_(graveyard),
+      config_(config),
+      epoch_(epoch),
+      doorbell_(doorbell ? std::move(doorbell) : std::make_shared<Doorbell>()) {
     if (config_.probe_interval <= std::chrono::milliseconds::zero() || config_.stall_timeout <= config_.probe_interval ||
-        config_.max_restarts == 0U) {
+        config_.handler_deadline <= config_.probe_interval || config_.max_restarts == 0U ||
+        config_.watchdog <= config_.recovery_timeout) {
         throw std::invalid_argument("invalid supervisor configuration");
     }
 }
@@ -200,9 +228,6 @@ void Supervisor::stop() {
 }
 
 void Supervisor::loop(std::stop_token stop) {
-    std::mutex wait_mutex;
-    std::condition_variable_any wakeup;
-    std::unique_lock wait_lock(wait_mutex);
     while (!stop.stop_requested()) {
         try {
             tick();
@@ -211,11 +236,26 @@ void Supervisor::loop(std::stop_token stop) {
         } catch (...) {
             std::cerr << "supervisor: unknown exception\n";
         }
-        wakeup.wait_for(wait_lock, stop, config_.probe_interval, [] { return false; });
+        doorbell_->wait(stop, config_.probe_interval);
     }
 }
 
+bool Supervisor::stuck() const noexcept {
+    const auto started = pass_started_ns_.load(std::memory_order_relaxed);
+    if (started == 0) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    return std::chrono::nanoseconds(now - started) > config_.watchdog;
+}
+
 void Supervisor::tick() {
+    pass_started_ns_.store(std::chrono::steady_clock::now().time_since_epoch().count(), std::memory_order_relaxed);
+    struct PassEnd {
+        std::atomic<std::int64_t>& started;
+        ~PassEnd() { started.store(0, std::memory_order_relaxed); }
+    } pass_end{pass_started_ns_};
+
     graveyard_.reap();
     for (auto* component : components_) {
         {
@@ -237,21 +277,33 @@ void Supervisor::tick() {
             std::lock_guard lock(mutex_);
             ++stats_.probes;
         }
+        bool went_live = false;
         {
             std::lock_guard lock(component->mutex_);
             auto& status = component->status_;
             if (probe.verdict == ProbeResult::Verdict::fault) {
                 status.state = probe.state;
                 status.last_error = probe.error;
+                component->rebuilding_ = false;
                 if (!component->unhealthy_) {
                     component->unhealthy_ = true;
-                    component->unhealthy_since_ = std::chrono::steady_clock::now();
+                    // The fault began before it was seen: when the thread died, or when the
+                    // stall started.
+                    component->unhealthy_since_ =
+                        std::chrono::steady_clock::now() -
+                        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                            std::chrono::duration<double, std::milli>(probe.observed_ms));
                 }
             } else {
                 status.state = probe.state;
                 component->unhealthy_ = false;
                 status.down_for_ms = 0.0;
+                went_live = component->rebuilding_ && probe.state != ComponentState::restarting;
+                component->rebuilding_ = probe.state == ComponentState::restarting && component->rebuilding_;
             }
+        }
+        if (went_live) {
+            record(*component, "live", "finished rebuilding its state and went live", 0.0, 0.0);
         }
         if (probe.verdict == ProbeResult::Verdict::fault) {
             handle_fault(*component, probe);
@@ -301,7 +353,7 @@ void Supervisor::handle_fault(SupervisedComponent& component, const ProbeResult&
         return;
     }
 
-    record(component, "fault", probe.cause, 0.0);
+    record(component, "fault", probe.cause, probe.observed_ms, 0.0);
     {
         std::lock_guard lock(component.mutex_);
         component.status_.state = ComponentState::restarting;
@@ -319,14 +371,16 @@ void Supervisor::handle_fault(SupervisedComponent& component, const ProbeResult&
     }
     const auto elapsed_ms = milliseconds_between(now, std::chrono::steady_clock::now());
 
-    std::uint64_t generation = 0;
     {
         std::lock_guard lock(component.mutex_);
         auto& status = component.status_;
         if (result.ok) {
             ++status.generation;
             ++status.restarts;
-            status.state = ComponentState::healthy;
+            // A replacement still rebuilding is working, not failed; the next probes show it
+            // as restarting until it goes live.
+            status.state = result.ready ? ComponentState::healthy : ComponentState::restarting;
+            component.rebuilding_ = !result.ready;
             status.last_recovery_ms = elapsed_ms;
             status.detail = result.detail;
             status.recovered_records = result.recovered_records;
@@ -334,10 +388,11 @@ void Supervisor::handle_fault(SupervisedComponent& component, const ProbeResult&
             component.unhealthy_ = false;
             status.down_for_ms = 0.0;
         } else {
+            // The next probe finds the failed replacement and tries again, within the
+            // restart budget, so a recovery that keeps failing ends in quarantine.
             status.state = probe.state;
             status.detail = "recovery failed: " + result.detail;
         }
-        generation = status.generation;
     }
     {
         std::lock_guard lock(mutex_);
@@ -345,9 +400,9 @@ void Supervisor::handle_fault(SupervisedComponent& component, const ProbeResult&
             ++stats_.restarts;
         }
     }
-    auto entry_detail = result.detail;
-    record(component, result.ok ? "restarted" : "recovery-failed", entry_detail, elapsed_ms);
-    static_cast<void>(generation);
+    // "rebuilding" is followed by "live" once the replacement has caught up.
+    const char* action = !result.ok ? "recovery-failed" : result.ready ? "restarted" : "rebuilding";
+    record(component, action, result.detail, probe.observed_ms, elapsed_ms);
 }
 
 void Supervisor::quarantine(SupervisedComponent& component, const ProbeResult& probe, const std::string& why) {
@@ -366,11 +421,11 @@ void Supervisor::quarantine(SupervisedComponent& component, const ProbeResult& p
         std::lock_guard lock(mutex_);
         ++stats_.quarantines;
     }
-    record(component, "quarantined", probe.cause + " — " + why, 0.0);
+    record(component, "quarantined", probe.cause + " — " + why, probe.observed_ms, 0.0);
 }
 
 void Supervisor::record(SupervisedComponent& component, const std::string& action, const std::string& detail,
-                        double recovery_ms) {
+                        double detect_ms, double recovery_ms) {
     std::uint64_t generation = 0;
     {
         std::lock_guard lock(component.mutex_);
@@ -380,13 +435,13 @@ void Supervisor::record(SupervisedComponent& component, const std::string& actio
     {
         std::lock_guard lock(mutex_);
         log_.push_back(SupervisionLogEntry{std::chrono::duration<double>(now - epoch_).count(), component.name(),
-                                           action, detail, generation, recovery_ms});
+                                           action, detail, generation, detect_ms, recovery_ms});
         while (log_.size() > 100U) {
             log_.pop_front();
         }
     }
     // Also on the bus, so the journal records it next to the data it affected.
-    event_bus_.publish(SupervisionEvent{component.name(), action, detail, generation, recovery_ms, now});
+    event_bus_.publish(SupervisionEvent{component.name(), action, detail, generation, detect_ms, recovery_ms, now});
 }
 
 std::vector<ComponentStatus> Supervisor::statuses() const {

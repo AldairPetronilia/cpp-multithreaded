@@ -258,7 +258,7 @@ std::string TelemetryRenderer::render(const SystemSnapshot& now, const ViewInfo&
     const RateCalculator rates(before ? now.uptime_s - before->uptime_s : 0.0);
     JsonWriter json;
     json.begin_object();
-    json.key("uptime_s").value(now.uptime_s).key("running").value(now.running);
+    json.key("uptime_s").value(now.uptime_s).key("timeline_s").value(now.timeline_s).key("running").value(now.running);
     json.key("view").value(view.view)
         .key("mode").value(now.mode)
         .key("session").value(now.session)
@@ -502,6 +502,7 @@ std::string TelemetryRenderer::render(const SystemSnapshot& now, const ViewInfo&
             .key("action").value(entry.action)
             .key("detail").value(entry.detail)
             .key("generation").value(entry.generation)
+            .key("detect_ms").value(entry.detect_ms)
             .key("recovery_ms").value(entry.recovery_ms)
             .end_object();
     }
@@ -557,6 +558,9 @@ std::string TelemetryRenderer::render(const SystemSnapshot& now, const ViewInfo&
             .key("tap_rejected").value(journal.tap_rejected)
             .key("repaired_bytes").value(journal.repaired_bytes)
             .key("quarantined").value(journal.quarantined_segments)
+            .key("failed").value(journal.failed)
+            .key("error").value(journal.error)
+            .key("lost_records").value(journal.lost_records)
             .end_object();
     }
     if (now.replay) {

@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stop_token>
 #include <string>
 #include <thread>
 #include <vector>
@@ -23,17 +24,25 @@
 namespace trading {
 
 struct SupervisorConfig {
+    // Probing catches hangs and poison. A crash does not wait for it: the dying thread
+    // rings the supervisor's doorbell.
     std::chrono::milliseconds probe_interval{20};
-    // A worker with work waiting and nothing completing for this long is stalled. Idle is
-    // not stalled: an empty mailbox never trips this.
+    // A worker with events waiting and nothing completing for this long is stalled. Idle is
+    // not stalled: an empty mailbox with no handler running never trips this.
     std::chrono::milliseconds stall_timeout{300};
-    // A handler running longer than this marks its worker degraded. That is a warning,
-    // not a restart: a merely slow handler still makes progress.
+    // A handler running this long with nothing queued behind it is stalled too, so a worker
+    // hung on its last event is not left alone just because the market went quiet. Half of
+    // either limit without progress marks the worker degraded first, as a warning.
     std::chrono::milliseconds handler_deadline{1'000};
     // Consecutive handler exceptions that mark a worker as poisoned.
     std::uint64_t poison_threshold{5};
-    // How long a replacement may take to rebuild its state and become ready.
-    std::chrono::milliseconds recovery_timeout{30'000};
+    // How long the supervisor waits for a replacement to rebuild its state before it moves
+    // on. A replacement still rebuilding after that keeps going and shows as restarting.
+    std::chrono::milliseconds recovery_timeout{5'000};
+    // One pass taking longer than this means the supervisor itself is stuck (on a lock a
+    // wedged worker holds, say). Nothing inside the process can fix that, so whoever owns
+    // the supervisor should exit for an external restarter; see Supervisor::stuck().
+    std::chrono::milliseconds watchdog{15'000};
     // Restart budget: more than this many restarts of one component within the window
     // quarantines it instead of looping.
     std::size_t max_restarts{3};
@@ -70,8 +79,8 @@ struct ComponentStatus {
     std::string last_error{};
     // What the last recovery did, in words.
     std::string detail{};
-    // How long the fault was visible before the supervisor acted, and how long the
-    // recovery then took.
+    // How long the fault had been there before the supervisor acted (the thread's death, or
+    // the stall's start), and how long the recovery then took.
     double last_detect_ms{};
     double last_recovery_ms{};
     // How long the component has been unhealthy, while it is.
@@ -93,19 +102,21 @@ struct ProbeResult {
 };
 
 struct RecoveryResult {
+    // False when the replacement could not be started or failed while rebuilding its state.
     bool ok{true};
+    // False when the replacement was still rebuilding at the recovery timeout.
+    bool ready{true};
     std::string detail{};
     std::uint64_t recovered_records{};
     std::uint64_t dead_letters{};
 };
 
-// Distinguishes a stuck worker from an idle one. A worker is stalled if its mailbox holds
-// work and its processed count has not moved for the timeout; an empty mailbox resets it.
+// Distinguishes a stuck worker from an idle one. Work is outstanding while events wait in
+// the mailbox or a handler is running; observe() returns how long work has been outstanding
+// with the processed count standing still. Idle, or still rebuilding state, returns zero.
 class StallDetector {
 public:
-    // The time the worker has been stalled, once that reaches the timeout.
-    [[nodiscard]] std::optional<std::chrono::milliseconds> observe(const WorkerHealth& health,
-                                                                   std::chrono::milliseconds timeout);
+    [[nodiscard]] std::chrono::milliseconds observe(const WorkerHealth& health);
 
 private:
     bool initialized_{false};
@@ -153,6 +164,22 @@ private:
     std::deque<std::chrono::steady_clock::time_point> restart_times_;
     std::chrono::steady_clock::time_point unhealthy_since_{};
     bool unhealthy_{false};
+    // A replacement outlived the recovery timeout and is still rebuilding; logged once ready.
+    bool rebuilding_{false};
+};
+
+// Lets a dying worker wake the supervisor at once, so a crash is handled within microseconds
+// rather than at the next probe. Probing still catches what cannot ring: hangs and poison.
+class Doorbell {
+public:
+    void ring() noexcept;
+    // Returns once rung (consuming the ring), once the timeout passes, or on stop.
+    void wait(std::stop_token stop, std::chrono::milliseconds timeout);
+
+private:
+    std::mutex mutex_;
+    std::condition_variable_any wakeup_;
+    bool rung_{false};
 };
 
 // Threads that were abandoned because they would not stop. C++ cannot kill a thread, so
@@ -192,6 +219,9 @@ struct SupervisionLogEntry {
     std::string action{};
     std::string detail{};
     std::uint64_t generation{};
+    // On a fault: how long it had been there when it was detected. On a restart: how long
+    // the replacement took.
+    double detect_ms{};
     double recovery_ms{};
 };
 
@@ -206,12 +236,15 @@ struct SupervisorStats {
     std::string escalation{};
 };
 
-// One thread that probes every component on an interval and replaces the ones that fail.
-// It is deliberately small and does nothing else, because it cannot itself be supervised:
-// the last line of defence is the process exiting for an external restarter.
+// One thread that probes every component on an interval, or at once when a dying worker
+// rings the doorbell, and replaces the ones that fail. It is deliberately small and does
+// nothing else, because it cannot itself be supervised: the last line of defence is the
+// process exiting for an external restarter.
 class Supervisor {
 public:
-    Supervisor(EventBus& event_bus, Graveyard& graveyard, SupervisorConfig config, TimePoint epoch);
+    // Workers ring doorbell when they die; with none given, the supervisor only probes.
+    Supervisor(EventBus& event_bus, Graveyard& graveyard, SupervisorConfig config, TimePoint epoch,
+               std::shared_ptr<Doorbell> doorbell = {});
     ~Supervisor();
     Supervisor(const Supervisor&) = delete;
     Supervisor& operator=(const Supervisor&) = delete;
@@ -225,6 +258,9 @@ public:
     void stop();
     // One pass over every component; the thread calls this, tests may too.
     void tick();
+    // True once the current pass has run past the watchdog. Checked from another thread,
+    // because a stuck supervisor cannot report itself.
+    [[nodiscard]] bool stuck() const noexcept;
 
     [[nodiscard]] std::vector<ComponentStatus> statuses() const;
     [[nodiscard]] std::vector<SupervisionLogEntry> log() const;
@@ -236,12 +272,15 @@ private:
     void handle_fault(SupervisedComponent& component, const ProbeResult& probe);
     void quarantine(SupervisedComponent& component, const ProbeResult& probe, const std::string& why);
     void record(SupervisedComponent& component, const std::string& action, const std::string& detail,
-                double recovery_ms);
+                double detect_ms, double recovery_ms);
 
     EventBus& event_bus_;
     Graveyard& graveyard_;
     const SupervisorConfig config_;
     const TimePoint epoch_;
+    const std::shared_ptr<Doorbell> doorbell_;
+    // Steady-clock time at which the current pass began; zero between passes.
+    std::atomic<std::int64_t> pass_started_ns_{0};
     std::vector<SupervisedComponent*> components_;
     std::function<void(const std::string&)> escalate_;
     mutable std::mutex mutex_;

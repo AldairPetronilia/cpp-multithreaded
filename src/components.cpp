@@ -1,11 +1,28 @@
 #include "trading/components.hpp"
 
+#include <deque>
 #include <set>
 #include <sstream>
 #include <unordered_set>
 
 namespace trading {
 namespace {
+
+// Recovery reads the journal, so it must be able to trust it: everything published before
+// now has to be readable, and nothing may have been lost on the way to disk.
+void sync_for_recovery(JournalWriter& journal) {
+    if (!journal.sync()) {
+        const auto stats = journal.stats();
+        throw JournalError(stats.failed ? "the journal has failed: " + stats.error
+                                        : std::string("the journal did not catch up with the bus"));
+    }
+}
+
+void check_readable(const JournalReader& reader) {
+    if (reader.corrupt()) {
+        throw JournalError("journal damaged during recovery: " + reader.error());
+    }
+}
 
 // Streams the market data a strategy trades out of the journal, oldest first. The journal
 // keeps growing while it is read, so each pass starts with a sync and the reader goes round
@@ -16,7 +33,7 @@ std::uint64_t stream_market_data(JournalWriter& journal, const std::vector<std::
     JournalReader reader(journal.directory());
     std::uint64_t delivered = 0;
     for (int pass = 0; pass < 8; ++pass) {
-        journal.sync();
+        sync_for_recovery(journal);
         std::uint64_t this_pass = 0;
         while (const auto record = reader.next()) {
             if (record->kind != JournalKind::market_data) {
@@ -31,9 +48,7 @@ std::uint64_t stream_market_data(JournalWriter& journal, const std::vector<std::
                 ++this_pass;
             }
         }
-        if (reader.corrupt()) {
-            throw JournalError("journal damaged during recovery: " + reader.error());
-        }
+        check_readable(reader);
         if (this_pass < 32U) {
             break;  // caught up with the tail
         }
@@ -42,48 +57,50 @@ std::uint64_t stream_market_data(JournalWriter& journal, const std::vector<std::
 }
 
 // Reconciles every journaled signal that has no execution report against the broker.
+// Signals keep arriving meanwhile and wait in the replacement's mailbox, which could fill up
+// and reject some; those are still journaled. So the reader goes back over the journal's
+// tail until a pass finds no new signal, and the live path skips whatever was settled here.
 void reconcile_unreported(JournalWriter& journal, OrderExecutionWorker& worker) {
-    journal.sync();
     JournalReader reader(journal.directory());
-    const auto stamp = MonotonicClock::now();
-    std::vector<std::pair<TradingSignalEvent, std::int64_t>> signals;
     std::unordered_set<std::string> reported;
-    while (const auto record = reader.next()) {
-        if (record->kind == JournalKind::trading_signal) {
-            if (auto signal = decode_signal(*record, stamp)) {
-                signals.emplace_back(std::move(*signal), record->wall_ns);
-            }
-        } else if (record->kind == JournalKind::execution_report) {
-            if (const auto report = decode_execution_report(*record, stamp)) {
-                reported.insert(report->client_order_id);
+    for (int pass = 0; pass < 8; ++pass) {
+        sync_for_recovery(journal);
+        const auto stamp = MonotonicClock::now();
+        std::vector<std::pair<TradingSignalEvent, std::int64_t>> signals;
+        while (const auto record = reader.next()) {
+            if (record->kind == JournalKind::trading_signal) {
+                if (auto signal = decode_signal(*record, stamp)) {
+                    signals.emplace_back(std::move(*signal), record->wall_ns);
+                }
+            } else if (record->kind == JournalKind::execution_report) {
+                if (const auto report = decode_execution_report(*record, stamp)) {
+                    reported.insert(report->client_order_id);
+                }
             }
         }
-    }
-    if (reader.corrupt()) {
-        throw JournalError("journal damaged during recovery: " + reader.error());
-    }
-    const auto now = wall_clock_ns();
-    for (const auto& [signal, wall_ns] : signals) {
-        if (!reported.contains(worker.order_id_for(signal))) {
-            worker.reconcile(signal, std::chrono::nanoseconds(now - wall_ns));
+        check_readable(reader);
+        const auto now = wall_clock_ns();
+        for (const auto& [signal, wall_ns] : signals) {
+            if (!reported.contains(worker.order_id_for(signal))) {
+                worker.reconcile(signal, std::chrono::nanoseconds(now - wall_ns));
+            }
+        }
+        if (signals.empty()) {
+            break;
         }
     }
 }
 
-void reapply_reports(JournalWriter& journal, PositionBook& book) {
-    journal.sync();
-    JournalReader reader(journal.directory());
-    const auto stamp = MonotonicClock::now();
-    while (const auto record = reader.next()) {
-        if (record->kind == JournalKind::execution_report) {
-            if (const auto report = decode_execution_report(*record, stamp)) {
-                book.apply(*report);
-            }
-        }
+// Health of a replacement once the supervisor stops waiting for it: a replacement that died
+// while rebuilding its state is a failed recovery, never a restart.
+RecoveryResult started(const WorkerHealth& health, bool ready) {
+    RecoveryResult result;
+    if (health.crashed) {
+        result.ok = false;
+        result.detail = health.error;
     }
-    if (reader.corrupt()) {
-        throw JournalError("journal damaged during recovery: " + reader.error());
-    }
+    result.ready = ready && !health.crashed;
+    return result;
 }
 
 std::string with_commas(std::uint64_t value) {
@@ -103,6 +120,30 @@ std::string milliseconds_text(double ms) {
 }
 
 }  // namespace
+
+void reapply_recent_reports(JournalWriter& journal, PositionBook& book) {
+    sync_for_recovery(journal);
+    JournalReader reader(journal.directory());
+    const auto stamp = MonotonicClock::now();
+    // Half a window's worth, so that every fill among them that the book has already applied
+    // is still among the ids it remembers, even allowing for small reorderings.
+    constexpr std::size_t keep = PositionBook::kDedupeWindow / 2U;
+    std::deque<ExecutionReportEvent> recent;
+    while (const auto record = reader.next()) {
+        if (record->kind == JournalKind::execution_report) {
+            if (auto report = decode_execution_report(*record, stamp)) {
+                recent.push_back(std::move(*report));
+                if (recent.size() > keep) {
+                    recent.pop_front();
+                }
+            }
+        }
+    }
+    check_readable(reader);
+    for (const auto& report : recent) {
+        book.apply(report);
+    }
+}
 
 // --- StrategyComponent ---------------------------------------------------------------------
 
@@ -130,6 +171,9 @@ std::shared_ptr<SignalProcessor> StrategyComponent::build(std::uint64_t generati
         SignalProcessorConfig{config_.name, config_.symbols, config_.quantity, worker_options_},
         std::move(strategy));
     built->set_fence(gate_, generation);
+    if (context_.doorbell) {
+        built->set_crash_hook([doorbell = context_.doorbell] { doorbell->ring(); });
+    }
     if (catch_up && context_.journal != nullptr) {
         built->set_catch_up([journal = context_.journal, controls = controls_](
                                 const std::vector<std::string>& symbols,
@@ -213,7 +257,10 @@ RecoveryResult StrategyComponent::recover(const std::string& cause) {
     fresh->start();
     const bool ready = fresh->wait_ready(context_.supervision.recovery_timeout);
 
-    RecoveryResult result;
+    auto result = started(fresh->health(), ready);
+    if (!result.ok) {
+        return result;
+    }
     const auto stats = fresh->stats();
     result.recovered_records = stats.recovered_records;
     result.dead_letters = stats.dead_letters;
@@ -261,6 +308,9 @@ std::shared_ptr<OrderExecutionWorker> ExecutionComponent::build(std::uint64_t ge
     auto built = std::make_shared<OrderExecutionWorker>(context_.bus, gateway_, config_);
     built->set_fence(gate_, generation);
     built->set_fault(fault_);
+    if (context_.doorbell) {
+        built->set_crash_hook([doorbell = context_.doorbell] { doorbell->ring(); });
+    }
     if (recover && context_.journal != nullptr) {
         built->set_recovery([journal = context_.journal](OrderExecutionWorker& worker) {
             reconcile_unreported(*journal, worker);
@@ -345,7 +395,10 @@ RecoveryResult ExecutionComponent::recover(const std::string& cause) {
     fresh->start();
     const bool ready = fresh->wait_ready(context_.supervision.recovery_timeout);
 
-    RecoveryResult result;
+    auto result = started(fresh->health(), ready);
+    if (!result.ok) {
+        return result;
+    }
     const auto recovery = fresh->stats().recovery;
     if (context_.journal == nullptr) {
         result.detail = "restarted cold: no journal, so signals missed while down are lost";
@@ -378,8 +431,9 @@ PositionComponent::PositionComponent(const ComponentContext& context, PositionBo
       context_(context),
       book_(book),
       config_(config),
-      fault_(std::make_shared<FaultControl>()) {
-    monitor_ = build(false);
+      fault_(std::make_shared<FaultControl>()),
+      gate_(std::make_shared<GenerationGate>()) {
+    monitor_ = build(gate_->current(), false);
 }
 
 PositionComponent::~PositionComponent() = default;
@@ -389,11 +443,15 @@ std::shared_ptr<PositionMonitor> PositionComponent::monitor() const {
     return monitor_;
 }
 
-std::shared_ptr<PositionMonitor> PositionComponent::build(bool recover) {
+std::shared_ptr<PositionMonitor> PositionComponent::build(std::uint64_t generation, bool recover) {
     auto built = std::make_shared<PositionMonitor>(context_.bus, book_, config_);
+    built->set_fence(gate_, generation);
     built->set_fault(fault_);
+    if (context_.doorbell) {
+        built->set_crash_hook([doorbell = context_.doorbell] { doorbell->ring(); });
+    }
     if (recover && context_.journal != nullptr) {
-        built->set_recovery([journal = context_.journal, &book = book_] { reapply_reports(*journal, book); });
+        built->set_recovery([journal = context_.journal, &book = book_] { reapply_recent_reports(*journal, book); });
     }
     return built;
 }
@@ -404,6 +462,10 @@ void PositionComponent::start() {
 
 void PositionComponent::stop() {
     monitor()->stop();
+}
+
+bool PositionComponent::wait_until_drained(std::chrono::milliseconds timeout) {
+    return monitor()->wait_until_drained(timeout);
 }
 
 PositionMonitorStats PositionComponent::stats() const {
@@ -422,6 +484,10 @@ PositionMonitorStats PositionComponent::stats() const {
     stats.rejections += total.rejections;
     stats.duplicates += total.duplicates;
     return stats;
+}
+
+void PositionComponent::fill_status(ComponentStatus& status) const {
+    status.fenced_writes = gate_->fenced_writes();
 }
 
 ProbeResult PositionComponent::probe() {
@@ -445,8 +511,12 @@ RecoveryResult PositionComponent::recover(const std::string& cause) {
     }
     context_.graveyard.bury(name(), failed, [failed] { return failed->finished(); });
 
+    // A hung monitor may wake up holding a report; the gate keeps it away from the book, and
+    // recovery below applies that report from the journal instead.
+    const auto generation = gate_->advance();
     const auto before = book_.fills_applied();
-    auto fresh = build(true);
+    const auto duplicates_before = book_.duplicates_ignored();
+    auto fresh = build(generation, true);
     {
         std::lock_guard lock(mutex_);
         monitor_ = fresh;
@@ -454,17 +524,19 @@ RecoveryResult PositionComponent::recover(const std::string& cause) {
     fresh->start();
     const bool ready = fresh->wait_ready(context_.supervision.recovery_timeout);
 
-    RecoveryResult result;
+    auto result = started(fresh->health(), ready);
+    if (!result.ok) {
+        return result;
+    }
     const auto applied = book_.fills_applied() - before;
-    const auto duplicates = book_.duplicates_ignored();
+    const auto recognised = book_.duplicates_ignored() - duplicates_before;
     if (context_.journal == nullptr) {
         result.detail = "restarted cold: fills reported while down are lost";
     } else if (!ready) {
         result.detail = "still reapplying journaled fills";
     } else {
-        result.detail = "reapplied journaled fills: " + std::to_string(applied) +
-                        " missed while down, the rest ignored as duplicates (" + with_commas(duplicates) +
-                        " duplicates ignored so far)";
+        result.detail = "reapplied the newest journaled fills: " + std::to_string(applied) +
+                        " missed while down, " + with_commas(recognised) + " recognised as already applied";
     }
     result.recovered_records = applied;
     return result;
@@ -473,6 +545,7 @@ RecoveryResult PositionComponent::recover(const std::string& cause) {
 void PositionComponent::quarantine() {
     auto failed = monitor();
     failed->abandon();
+    gate_->advance();
     context_.graveyard.bury(name(), failed, [failed] { return failed->finished(); });
 }
 
@@ -480,7 +553,15 @@ void PositionComponent::quarantine() {
 
 FeedComponent::FeedComponent(const ComponentContext& context, MarketDataProducerConfig config)
     : SupervisedComponent(config.name, "feed"), context_(context), config_(std::move(config)) {
-    producer_ = std::make_shared<MarketDataProducer>(context_.bus, config_);
+    producer_ = build(config_);
+}
+
+std::shared_ptr<MarketDataProducer> FeedComponent::build(const MarketDataProducerConfig& config) const {
+    auto built = std::make_shared<MarketDataProducer>(context_.bus, config);
+    if (context_.doorbell) {
+        built->set_crash_hook([doorbell = context_.doorbell] { doorbell->ring(); });
+    }
+    return built;
 }
 
 FeedComponent::~FeedComponent() = default;
@@ -552,10 +633,12 @@ ProbeResult FeedComponent::probe() {
         std::lock_guard lock(mutex_);
         stopping = stopping_;
     }
-    if (!stopping && producer()->stats().crashed) {
+    const auto current = producer();
+    if (!stopping && current->stats().crashed) {
         result.verdict = ProbeResult::Verdict::fault;
         result.state = ComponentState::crashed;
         result.cause = "feed thread died";
+        result.observed_ms = std::chrono::duration<double, std::milli>(current->crashed_for()).count();
     }
     return result;
 }
@@ -573,7 +656,7 @@ RecoveryResult FeedComponent::recover(const std::string& cause) {
     next.interval = last.interval;
     // The random walk continues from the same prices with a fresh stream of shocks.
     next.seed = config_.seed + 7'919U;
-    auto fresh = std::make_shared<MarketDataProducer>(context_.bus, next);
+    auto fresh = build(next);
     if (last.paused) {
         fresh->set_paused(true);
     }

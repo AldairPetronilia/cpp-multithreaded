@@ -1117,7 +1117,9 @@ void dashboard_server_serves_page_stream_and_controls() {
 
 }  // namespace
 
-int main() {
+// trading_tests [text] runs the tests whose name contains text, or every test.
+int main(int argc, char* argv[]) {
+    const std::string filter = argc > 1 ? argv[1] : "";
     std::vector<std::pair<std::string, std::function<void()>>> tests{
         {"messaging fan-out and type filtering", messaging_delivers_to_every_matching_subscriber},
         {"topic routing per strategy", topics_partition_market_data_between_strategies},
@@ -1151,6 +1153,7 @@ int main() {
     for (auto& test : resilience_tests()) {
         tests.push_back(std::move(test));
     }
+    std::erase_if(tests, [&](const auto& test) { return test.first.find(filter) == std::string::npos; });
 
     std::size_t failures = 0;
     for (const auto& [name, test] : tests) {

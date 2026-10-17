@@ -198,6 +198,8 @@ AppConfig AppConfig::from_command_line(int argc, char* argv[]) {
         }
     }
 
+    // Recorded before the vectors are moved: an explicit topology overrides a replay's manifest.
+    const bool explicit_topology = !feeds.empty() || !strategies.empty();
     if (!feeds.empty()) {
         system.feeds = std::move(feeds);
     }
@@ -229,7 +231,7 @@ AppConfig AppConfig::from_command_line(int argc, char* argv[]) {
     if (replay_directory) {
         config.replay = true;
         replay_options.directory = *replay_directory;
-        if (feeds.empty() && strategies.empty()) {
+        if (!explicit_topology) {
             auto recorded = SystemConfig::from_manifest(*replay_directory, system);
             if (!recorded) {
                 throw std::invalid_argument("no manifest.txt in " + replay_directory->string() +

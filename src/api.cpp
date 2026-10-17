@@ -154,6 +154,10 @@ std::uint64_t RequestHandle::id() const noexcept {
     return id_;
 }
 
+std::stop_token RequestHandle::token() const noexcept {
+    return cancellation_ ? cancellation_->source.get_token() : std::stop_token{};
+}
+
 class ApiRequestManager::Impl {
 public:
     struct RequestState {
@@ -428,7 +432,8 @@ private:
         // Only idempotent requests carrying a key are retried: the key lets the server
         // discard a duplicate if the first attempt actually executed.
         const bool retry_safe = state->request.idempotent && !state->request.idempotency_key.empty();
-        if (!cancellation.stop_requested() && retry_safe && is_retryable(response) &&
+        const bool retry_here = config_.retry_connection_failures || response.error != ApiError::connection_failure;
+        if (!cancellation.stop_requested() && retry_safe && retry_here && is_retryable(response) &&
             state->attempt <= config_.max_retries) {
             const auto delay = response.retry_after > std::chrono::milliseconds::zero()
                                    ? response.retry_after

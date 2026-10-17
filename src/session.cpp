@@ -105,9 +105,15 @@ ControlResult LiveSession::start_replay(std::string_view mode, std::string_view 
     } else {
         options.speed = parse_real(speed);
     }
-    // Everything published so far must be readable, and the replay stops where the
-    // recording stands now.
-    journal->sync();
+    // The replay stops where the recording stands now. Every quote up to that point must be
+    // readable, and so must the signals those quotes trigger, which the live strategies may
+    // still be working out: without them, a correct re-derivation would show false extras.
+    if (!journal->sync()) {
+        return failure(409, "the journal is not keeping up or has failed; nothing reliable to replay");
+    }
+    options.to_sequence = journal->last_sequence();
+    live_->drain_strategies(std::chrono::seconds(1));
+    static_cast<void>(journal->sync());
     options.directory = journal->directory();
 
     auto base = live_->config();

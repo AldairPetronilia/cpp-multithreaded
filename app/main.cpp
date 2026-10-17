@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdlib>
 #include <exception>
 #include <iomanip>
 #include <iostream>
@@ -209,18 +210,27 @@ int main(int argc, char* argv[]) {
             std::cout << "Journal: " << journal->directory().string() << '\n' << std::flush;
         }
         // Supervisory loop, far from any hot path. A signal handler can only set a flag,
-        // so the flag, the deadline and feed completion are checked every 50 ms.
+        // so the flag, the deadline and feed completion are checked every 50 ms. A replay
+        // shown on the dashboard stays up when it reaches the end, so it can be scrubbed back.
         const auto deadline = config.duration
                                   ? std::optional(trading::MonotonicClock::now() + *config.duration)
                                   : std::nullopt;
+        const bool stop_when_done = !(config.dashboard && config.replay);
         const auto should_stop = [&] {
             return interrupted.load() || (deadline && trading::MonotonicClock::now() >= *deadline) ||
-                   session.feeds_finished();
+                   (stop_when_done && session.feeds_finished());
         };
         while (!should_stop()) {
+            // The supervisor cannot report itself stuck (blocked on a lock a wedged worker
+            // holds, say), so this thread watches it, and exits for an external restarter.
+            if (const auto* supervisor = session.live().supervisor(); supervisor != nullptr && supervisor->stuck()) {
+                std::cerr << "escalation: the supervisor has been stuck for over "
+                          << supervisor->config().watchdog.count() << " ms\n";
+                std::_Exit(3);
+            }
             std::this_thread::sleep_for(50ms);
         }
-        // The summary is of the system as it ran, so it is taken before the shutdown drains.
+        // Stopping drains every stage first, so the summary's counts reconcile.
         session.live().stop();
 
 #if TRADING_HAS_DASHBOARD

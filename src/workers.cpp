@@ -83,6 +83,12 @@ void EventWorker::set_start_hook(std::function<void()> hook) {
     start_hook_ = std::move(hook);
 }
 
+void EventWorker::set_crash_hook(std::function<void()> hook) {
+    std::lock_guard lock(lifecycle_mutex_);
+    ensure_not_started_locked();
+    crash_hook_ = std::move(hook);
+}
+
 void EventWorker::start() {
     std::lock_guard lock(lifecycle_mutex_);
     if (started_) {
@@ -136,10 +142,12 @@ bool EventWorker::wait_ready(std::chrono::milliseconds timeout) {
 }
 
 bool EventWorker::wait_until_drained(std::chrono::milliseconds timeout) {
-    const auto drained = [this] {
-        // Everything accepted is either handled or was evicted before it could be.
-        const auto mailbox = mailbox_->stats();
-        return processed_.load(std::memory_order_acquire) + mailbox.evicted_oldest >= mailbox.accepted ||
+    // A barrier for what was accepted before the call, not "idle": waiting for a mailbox
+    // that keeps receiving to be empty could last forever under steady traffic. The mailbox
+    // is FIFO, so once that many events have been handled or evicted, all of them have.
+    const auto target = mailbox_->stats().accepted;
+    const auto drained = [this, target] {
+        return processed_.load(std::memory_order_acquire) + mailbox_->stats().evicted_oldest >= target ||
                finished_.load(std::memory_order_acquire);
     };
     const auto deadline = MonotonicClock::now() + timeout;
@@ -180,10 +188,13 @@ WorkerHealth EventWorker::health() const {
     health.processed = processed_.load(std::memory_order_relaxed);
     health.backlog = mailbox_->size();
     health.consecutive_errors = consecutive_errors_.load(std::memory_order_relaxed);
+    const auto now_ns = MonotonicClock::now().time_since_epoch().count();
     const auto since = handler_since_ns_.load(std::memory_order_relaxed);
     if (since != 0) {
-        health.handler_running_for =
-            std::chrono::nanoseconds(MonotonicClock::now().time_since_epoch().count() - since);
+        health.handler_running_for = std::chrono::nanoseconds(now_ns - since);
+    }
+    if (const auto died = crashed_at_ns_.load(std::memory_order_relaxed); died != 0) {
+        health.crashed_for = std::chrono::nanoseconds(now_ns - died);
     }
     std::lock_guard lock(error_mutex_);
     health.error = last_error_;
@@ -211,6 +222,7 @@ void EventWorker::record_crash(const char* what) {
         last_error_ = what;
     }
     handler_since_ns_.store(0, std::memory_order_relaxed);
+    crashed_at_ns_.store(MonotonicClock::now().time_since_epoch().count(), std::memory_order_relaxed);
     crashed_.store(true, std::memory_order_release);
     report_failure(name_, what);
 }
@@ -223,9 +235,9 @@ void EventWorker::run() {
             try {
                 start_hook_();
             } catch (const std::exception& exception) {
-                // Recovery is best effort; the worker still serves live traffic.
-                handler_errors_.fetch_add(1, std::memory_order_relaxed);
-                report_failure(name_, exception.what());
+                // A replacement that could not rebuild its state must not go live as if it
+                // had: dying lets the supervisor retry, and quarantine it if that keeps failing.
+                throw std::runtime_error(std::string("state recovery failed: ") + exception.what());
             }
         }
         mark_ready();
@@ -238,6 +250,9 @@ void EventWorker::run() {
     finished_.store(true, std::memory_order_release);
     { std::lock_guard lock(wait_mutex_); }
     wait_cv_.notify_all();
+    if (crashed_.load(std::memory_order_relaxed) && crash_hook_) {
+        crash_hook_();
+    }
 }
 
 void EventWorker::run_loop() {
@@ -442,15 +457,26 @@ void MarketDataProducer::run(std::stop_token stop_token) {
             next_round = now - next_round > interval ? now + interval : next_round + interval;
         }
     } catch (const std::exception& exception) {
-        failures_.fetch_add(1, std::memory_order_relaxed);
-        crashed_.store(true, std::memory_order_release);
         report_failure(config_.name, exception.what());
-    } catch (...) {
         failures_.fetch_add(1, std::memory_order_relaxed);
+        crashed_at_ns_.store(MonotonicClock::now().time_since_epoch().count(), std::memory_order_relaxed);
         crashed_.store(true, std::memory_order_release);
+    } catch (...) {
         report_failure(config_.name, "unknown exception");
+        failures_.fetch_add(1, std::memory_order_relaxed);
+        crashed_at_ns_.store(MonotonicClock::now().time_since_epoch().count(), std::memory_order_relaxed);
+        crashed_.store(true, std::memory_order_release);
     }
     finished_.store(true, std::memory_order_release);
+    if (crashed_.load(std::memory_order_relaxed) && crash_hook_) {
+        crash_hook_();
+    }
+}
+
+std::chrono::nanoseconds MarketDataProducer::crashed_for() const noexcept {
+    const auto died = crashed_at_ns_.load(std::memory_order_relaxed);
+    return died == 0 ? std::chrono::nanoseconds::zero()
+                     : std::chrono::nanoseconds(MonotonicClock::now().time_since_epoch().count() - died);
 }
 
 SignalProcessor::SignalProcessor(EventBus& event_bus,
@@ -776,6 +802,7 @@ ApplyResult PositionBook::apply(const ExecutionReportEvent& execution) {
     return ApplyResult::applied;
 }
 
+
 std::vector<PositionEntry> PositionBook::snapshot() const {
     std::lock_guard lock(mutex_);
     std::vector<PositionEntry> entries;
@@ -823,6 +850,11 @@ PositionMonitor::PositionMonitor(EventBus& event_bus,
     worker_.subscribe<ExecutionReportEvent>();
 }
 
+void PositionMonitor::set_fence(std::shared_ptr<GenerationGate> gate, std::uint64_t generation) {
+    gate_ = std::move(gate);
+    generation_ = generation;
+}
+
 void PositionMonitor::set_recovery(std::function<void()> recovery) {
     if (recovery) {
         worker_.set_start_hook(std::move(recovery));
@@ -862,7 +894,17 @@ void PositionMonitor::on_event(const EventEnvelope& envelope) {
     if (fault_ != nullptr) {
         fault_->on_event();
     }
-    if (position_book_.apply(*execution) == ApplyResult::duplicate) {
+    auto applied = ApplyResult::not_filled;
+    const auto apply = [&] { applied = position_book_.apply(*execution); };
+    // A replaced monitor must not touch the book: the check and the write are one step.
+    if (gate_ != nullptr) {
+        if (!gate_->run_if_current(generation_, apply)) {
+            return;
+        }
+    } else {
+        apply();
+    }
+    if (applied == ApplyResult::duplicate) {
         duplicates_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -876,9 +918,11 @@ void PositionMonitor::on_event(const EventEnvelope& envelope) {
     }
 }
 
-ActivityRecorder::ActivityRecorder(EventBus& event_bus, ActivityRecorderConfig config, TimePoint epoch)
+ActivityRecorder::ActivityRecorder(EventBus& event_bus, ActivityRecorderConfig config, TimePoint epoch,
+                                   std::function<double()> timeline)
     : config_(config),
       epoch_(epoch),
+      timeline_(std::move(timeline)),
       worker_("activity-recorder", event_bus, config.worker,
               [this](const EventEnvelope& envelope) { on_event(envelope); }) {
     if (config_.sample_interval <= std::chrono::milliseconds::zero() ||
@@ -916,7 +960,7 @@ ActivitySnapshot ActivityRecorder::snapshot() const {
 }
 
 double ActivityRecorder::seconds_since_epoch(TimePoint time) const {
-    return std::chrono::duration<double>(time - epoch_).count();
+    return timeline_ ? timeline_() : std::chrono::duration<double>(time - epoch_).count();
 }
 
 void ActivityRecorder::on_event(const EventEnvelope& envelope) {

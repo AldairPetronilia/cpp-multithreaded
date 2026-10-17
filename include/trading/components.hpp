@@ -30,7 +30,20 @@ struct ComponentContext {
     SupervisorConfig supervision;
     // Where state is rebuilt from. Null means a replacement starts cold.
     JournalWriter* journal{nullptr};
+    // Rung by a worker as it dies. Null when nothing supervises the component.
+    std::shared_ptr<Doorbell> doorbell{};
 };
+
+// Recovery helpers, each run on the replacement's own thread before it goes live. They throw
+// JournalError when the journal cannot be trusted (it failed, fell behind or is damaged), so
+// the replacement dies rather than going live on a partial history.
+//
+// Reapplies the newest journaled execution reports to the position book. The book outlives
+// the monitor, so it is the checkpoint: a replacement only needs the reports its predecessor
+// missed, which are the newest ones, and the book recognises the rest by order id. Reapplying
+// the whole history would lean on the book's deduplication window, which spans a redelivery,
+// not a session: past 65,536 fills the oldest would count twice.
+void reapply_recent_reports(JournalWriter& journal, PositionBook& book);
 
 // Each component below follows the same recovery recipe:
 //   1. abandon the failed instance (it may be stuck; never wait for it) and bury it,
@@ -122,6 +135,7 @@ public:
 
     void start();
     void stop();
+    bool wait_until_drained(std::chrono::milliseconds timeout);
 
     [[nodiscard]] PositionMonitorStats stats() const;
     [[nodiscard]] FaultControl& fault() noexcept { return *fault_; }
@@ -130,14 +144,18 @@ public:
     RecoveryResult recover(const std::string& cause) override;
     void quarantine() override;
 
+protected:
+    void fill_status(ComponentStatus& status) const override;
+
 private:
     [[nodiscard]] std::shared_ptr<PositionMonitor> monitor() const;
-    [[nodiscard]] std::shared_ptr<PositionMonitor> build(bool recover);
+    [[nodiscard]] std::shared_ptr<PositionMonitor> build(std::uint64_t generation, bool recover);
 
     ComponentContext context_;
     PositionBook& book_;
     const PositionMonitorConfig config_;
     std::shared_ptr<FaultControl> fault_;
+    std::shared_ptr<GenerationGate> gate_;
     StallDetector stall_;
     mutable std::mutex mutex_;
     std::shared_ptr<PositionMonitor> monitor_;
@@ -168,6 +186,7 @@ public:
 
 private:
     [[nodiscard]] std::shared_ptr<MarketDataProducer> producer() const;
+    [[nodiscard]] std::shared_ptr<MarketDataProducer> build(const MarketDataProducerConfig& config) const;
 
     ComponentContext context_;
     MarketDataProducerConfig config_;

@@ -92,6 +92,8 @@ struct SupervisionEvent {
     std::string action{};
     std::string detail{};
     std::uint64_t generation{};
+    // On a fault: how long it had been there when detected. On a restart: zero.
+    double detect_ms{};
     double recovery_ms{};
     TimePoint at{};
 };

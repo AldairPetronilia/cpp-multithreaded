@@ -58,6 +58,8 @@ struct WorkerHealth {
     std::size_t backlog{};
     // How long the handler currently running has been running; zero when none is.
     std::chrono::nanoseconds handler_running_for{};
+    // How long ago the thread died; zero while it is alive.
+    std::chrono::nanoseconds crashed_for{};
     std::uint64_t consecutive_errors{};
     std::string error{};
 };
@@ -88,8 +90,12 @@ public:
     }
 
     // Runs on the worker thread before it consumes its mailbox, which keeps buffering
-    // meanwhile. Used to rebuild a replacement worker's state from the journal.
+    // meanwhile. Used to rebuild a replacement worker's state from the journal. If it
+    // throws, the worker dies instead of going live with half-rebuilt state.
     void set_start_hook(std::function<void()> hook);
+    // Runs on the worker thread as it dies, so a supervisor can act at once rather than at
+    // its next probe. Must not block.
+    void set_crash_hook(std::function<void()> hook);
 
     void start();
     // Unsubscribes, then handles every event already queued before the thread exits.
@@ -130,6 +136,7 @@ private:
     std::vector<EventBus::Subscription> subscriptions_;
     std::thread thread_;
     std::function<void()> start_hook_;
+    std::function<void()> crash_hook_;
     bool started_{false};
     bool stopped_{false};
     std::atomic<std::uint64_t> processed_{0};
@@ -138,6 +145,8 @@ private:
     std::atomic<std::int64_t> busy_ns_{0};
     // Steady-clock time at which the running handler began; zero while none is running.
     std::atomic<std::int64_t> handler_since_ns_{0};
+    // Steady-clock time at which the thread died; zero while it is alive.
+    std::atomic<std::int64_t> crashed_at_ns_{0};
     std::atomic<bool> crashed_{false};
     std::atomic<bool> abandoned_{false};
     std::atomic<bool> finished_{false};
@@ -207,8 +216,12 @@ public:
     void set_paused(bool paused);
     // Fault injection: the feed thread fails at the start of its next round.
     void inject_crash() noexcept { crash_requested_.store(true, std::memory_order_relaxed); }
+    // Runs on the feed thread as it dies; must not block. Set before start().
+    void set_crash_hook(std::function<void()> hook) { crash_hook_ = std::move(hook); }
     // Where a replacement should continue from; read it after the feed has ended.
     [[nodiscard]] FeedResumePoint resume_point() const;
+    // How long ago the feed thread died; zero while it is alive.
+    [[nodiscard]] std::chrono::nanoseconds crashed_for() const noexcept;
 
     [[nodiscard]] ProducerStats stats() const;
     [[nodiscard]] const std::string& name() const noexcept { return config_.name; }
@@ -224,6 +237,8 @@ private:
     std::atomic<bool> finished_{false};
     std::atomic<bool> crashed_{false};
     std::atomic<bool> crash_requested_{false};
+    std::atomic<std::int64_t> crashed_at_ns_{0};
+    std::function<void()> crash_hook_;
     std::atomic<std::uint64_t> next_round_{0};
     std::unique_ptr<std::atomic<double>[]> last_prices_;
     std::atomic<std::uint64_t> events_published_{0};
@@ -279,6 +294,7 @@ public:
     // and the mailbox's overlap with that history is skipped by sequence number.
     void set_fence(std::shared_ptr<GenerationGate> gate, std::uint64_t generation);
     void set_catch_up(CatchUpSource source);
+    void set_crash_hook(std::function<void()> hook) { worker_.set_crash_hook(std::move(hook)); }
 
     void start();
     void stop();
@@ -360,6 +376,7 @@ public:
     void set_recovery(std::function<void(OrderExecutionWorker&)> recovery);
     // Fault injection from the dashboard.
     void set_fault(std::shared_ptr<FaultControl> fault) { fault_ = std::move(fault); }
+    void set_crash_hook(std::function<void()> hook) { worker_.set_crash_hook(std::move(hook)); }
 
     void start();
     void stop();
@@ -427,7 +444,9 @@ enum class ApplyResult {
 // counting. Reports without an order id are always applied.
 class PositionBook {
 public:
-    // Remembers this many order ids; older ones are forgotten, like a broker's window.
+    // Remembers this many order ids; older ones are forgotten, like a broker's window. A
+    // duplicate arrives close behind its original (a redelivery, a recovered completion),
+    // so the window only has to span that gap, never the whole session.
     static constexpr std::size_t kDedupeWindow = 65'536;
 
     ApplyResult apply(const ExecutionReportEvent& execution);
@@ -465,10 +484,14 @@ class PositionMonitor {
 public:
     PositionMonitor(EventBus& event_bus, PositionBook& position_book, PositionMonitorConfig config);
 
+    // Must be called before start(). Reports are applied only while generation is the
+    // gate's current one, so a replaced monitor that wakes up cannot touch the book.
+    void set_fence(std::shared_ptr<GenerationGate> gate, std::uint64_t generation);
     // Runs on the worker thread before it consumes its mailbox; a replacement uses it to
-    // reapply the journaled execution reports to the (idempotent) position book.
+    // reapply the journaled execution reports its predecessor missed.
     void set_recovery(std::function<void()> recovery);
     void set_fault(std::shared_ptr<FaultControl> fault) { fault_ = std::move(fault); }
+    void set_crash_hook(std::function<void()> hook) { worker_.set_crash_hook(std::move(hook)); }
 
     void start();
     void stop();
@@ -477,12 +500,17 @@ public:
     [[nodiscard]] WorkerHealth health() const { return worker_.health(); }
     [[nodiscard]] bool finished() const noexcept { return worker_.finished(); }
     [[nodiscard]] bool wait_ready(std::chrono::milliseconds timeout) { return worker_.wait_ready(timeout); }
+    [[nodiscard]] bool wait_until_drained(std::chrono::milliseconds timeout) {
+        return worker_.wait_until_drained(timeout);
+    }
 
 private:
     void on_event(const EventEnvelope& envelope);
 
     PositionBook& position_book_;
     std::shared_ptr<FaultControl> fault_;
+    std::shared_ptr<GenerationGate> gate_;
+    std::uint64_t generation_{1};
     std::atomic<std::uint64_t> fills_{0};
     std::atomic<std::uint64_t> rejections_{0};
     std::atomic<std::uint64_t> duplicates_{0};
@@ -539,7 +567,11 @@ struct ActivitySnapshot {
 // shows that observers can be added without touching the trading components.
 class ActivityRecorder {
 public:
-    ActivityRecorder(EventBus& event_bus, ActivityRecorderConfig config, TimePoint epoch);
+    // Events are placed at their own time since epoch, or, given a timeline, at the
+    // timeline's position when they arrive: a replay passes its position in the recording,
+    // so its charts show recorded time however fast the replay runs.
+    ActivityRecorder(EventBus& event_bus, ActivityRecorderConfig config, TimePoint epoch,
+                     std::function<double()> timeline = {});
 
     void start();
     void stop();
@@ -560,6 +592,7 @@ private:
 
     const ActivityRecorderConfig config_;
     const TimePoint epoch_;
+    const std::function<double()> timeline_;
     mutable std::mutex mutex_;
     std::map<std::string, Series> series_;
     std::deque<TapeEntry> tape_;

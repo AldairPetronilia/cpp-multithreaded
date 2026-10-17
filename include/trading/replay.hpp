@@ -103,11 +103,16 @@ public:
     void set_speed(double speed);
     void set_pacing(ReplayPacing pacing);
     // Jumps to the first record at or after sequence. A re-derivation that skips quotes
-    // starts its strategies cold, so it can no longer be compared with the recording.
+    // starts its strategies cold, so it can no longer be compared with the recording. At the
+    // end of the recording the feed waits rather than exits, so a seek can still take it back.
     void seek(std::uint64_t sequence);
 
     [[nodiscard]] ReplayProgress progress() const;
+    // True once the feed has published the whole range and downstream has caught up (until a
+    // seek takes it back), or it has failed.
     [[nodiscard]] bool finished() const noexcept;
+    // Seconds into the recording of the last record published.
+    [[nodiscard]] double position_s() const noexcept;
     [[nodiscard]] bool seeked() const noexcept { return seeked_.load(std::memory_order_relaxed); }
     [[nodiscard]] std::uint64_t first_sequence() const noexcept { return first_; }
     [[nodiscard]] std::uint64_t last_sequence() const noexcept { return last_; }
@@ -126,6 +131,8 @@ private:
 
     void run(std::stop_token stop);
     Pace pace(std::stop_token stop, const JournalRecord& record, PaceState& state);
+    // At the end of the recording: true once a seek arrives, false on stop.
+    bool wait_for_seek(std::stop_token stop);
     void fail(const std::string& message);
 
     EventBus& event_bus_;
@@ -170,12 +177,12 @@ struct VerificationReport {
     std::uint64_t rederived{};
     std::uint64_t matched{};
     // Recorded signals the replay did not produce, and signals it produced that were not
-    // recorded.
+    // recorded (each counted as often as it occurs, so a repeat cannot hide an absence).
     std::uint64_t missing{};
     std::uint64_t extra{};
-    // Differences that fall on a strategy the supervisor had to restart during the
-    // recording: a restarted strategy catches up silently, so it skips the signals that
-    // fired while it was down. Those differences are expected.
+    // Differences on quotes that arrived while their strategy was down, between the fault
+    // starting and the replacement going live: a restarted strategy catches up silently, so
+    // it skips the signals those quotes triggered. Only those differences are expected.
     std::uint64_t explained{};
     std::vector<std::string> outage_components{};
     // running | match | explained | diverged | not-comparable
@@ -185,11 +192,13 @@ struct VerificationReport {
 
 // Compares the signals a replay derives with the ones the journal recorded. A signal is
 // identified by strategy, symbol, triggering-quote sequence and side, which is also what
-// the order id is built from, so a match means the same orders would have been placed.
+// the order id is built from, and it matches only if its quantity and price match too, so
+// a match means the same orders would have been placed.
 class ReplayVerifier {
 public:
-    // Reads the recorded signals in [from, to] from the journal and subscribes to the
-    // replay bus's signals. comparable=false marks a replay that cannot be compared.
+    // Expects the recorded signals triggered by the quotes in [from, to]: they may have been
+    // journaled after `to`, so the journal is read to its end. Subscribes to the replay bus's
+    // signals. comparable=false marks a replay that cannot be compared.
     ReplayVerifier(EventBus& event_bus, const std::filesystem::path& directory, std::uint64_t from,
                    std::uint64_t to, bool comparable);
 
@@ -201,13 +210,25 @@ public:
     [[nodiscard]] VerificationReport report(bool complete) const;
 
 private:
+    struct Expected {
+        std::string strategy;
+        std::string quote;  // symbol|sequence of the triggering quote
+        std::uint64_t remaining{};
+    };
+    struct Extra {
+        std::string strategy;
+        std::string quote;
+    };
+
     void on_event(const EventEnvelope& envelope);
+    [[nodiscard]] bool explains(const std::string& strategy, const std::string& quote) const;
 
     mutable std::mutex mutex_;
-    std::unordered_set<std::string> expected_;
-    std::unordered_map<std::string, std::uint64_t> expected_by_strategy_;
-    std::unordered_map<std::string, std::uint64_t> matched_by_strategy_;
-    std::unordered_map<std::string, std::uint64_t> extra_by_strategy_;
+    // Keyed by identity and order fields; remaining counts down as the replay matches them.
+    std::unordered_map<std::string, Expected> expected_;
+    std::vector<Extra> extras_;
+    // Per component, the quotes that arrived while it was down.
+    std::unordered_map<std::string, std::unordered_set<std::string>> outage_quotes_;
     std::set<std::string> outages_;
     std::uint64_t recorded_{0};
     std::uint64_t rederived_{0};

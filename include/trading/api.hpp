@@ -96,6 +96,9 @@ struct ApiManagerConfig {
     std::size_t max_retries{2};
     std::chrono::milliseconds initial_retry_backoff{20};
     std::chrono::milliseconds max_retry_backoff{500};
+    // A gateway in a pool turns this off: a connection that failed is better retried through
+    // another gateway at once than through the same one after a backoff.
+    bool retry_connection_failures{true};
 };
 
 enum class SubmitStatus {
@@ -118,6 +121,9 @@ public:
     void cancel() const;
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] std::uint64_t id() const noexcept;
+    // Stops once the request is cancelled, so cancellation can be forwarded to another
+    // request standing in for this one.
+    [[nodiscard]] std::stop_token token() const noexcept;
 
 private:
     friend class ApiRequestManager;

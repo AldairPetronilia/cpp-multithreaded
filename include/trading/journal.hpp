@@ -116,6 +116,12 @@ struct JournalStats {
     // aside because a complete record failed its checksum.
     std::uint64_t repaired_bytes{};
     std::uint64_t quarantined_segments{};
+    // A write or sync failed (a full disk, an I/O error). The journal then stops writing, so
+    // what it holds stays a clean prefix, and counts what it could not record; recovery
+    // refuses to rebuild state from it.
+    bool failed{};
+    std::string error{};
+    std::uint64_t lost_records{};
 };
 
 // Subscribes to every journaled event type and appends them from one writer thread. An
@@ -133,8 +139,9 @@ public:
     void stop();
 
     // Barrier: returns once every event published before the call has been written and
-    // handed to the OS, so a reader opened afterwards sees it.
-    void sync();
+    // handed to the OS, so a reader opened afterwards sees it. False if the journal could
+    // not catch up within a few seconds or has failed.
+    [[nodiscard]] bool sync();
 
     [[nodiscard]] JournalStats stats() const;
     [[nodiscard]] const std::filesystem::path& directory() const noexcept { return config_.directory; }
@@ -148,6 +155,7 @@ private:
     void close_segment_locked();
     void flush_locked();
     void fsync_locked();
+    void fail_locked(const std::string& what);
     void record_gap();
     void flusher_loop(std::stop_token stop);
     void recover_existing();
@@ -160,6 +168,7 @@ private:
     std::uint64_t epoch_{0};
     std::uint64_t segment_size_{0};
     std::uint64_t next_sequence_{1};
+    std::uint64_t buffered_records_{0};
     std::uint64_t seen_rejections_{0};
     std::chrono::steady_clock::time_point last_fsync_{};
     JournalStats stats_{};
@@ -189,6 +198,10 @@ public:
     // True once a complete record failed its checksum or framing: the data after it cannot
     // be trusted, and next() returns nothing more.
     [[nodiscard]] bool corrupt() const noexcept { return corrupt_; }
+    // Records missing between the ones returned so far (a segment set aside as damaged, say).
+    // Sequences are consecutive, so a hole is visible; a caller must not treat a session
+    // with one as complete.
+    [[nodiscard]] std::uint64_t missing() const noexcept { return missing_; }
     [[nodiscard]] const std::string& error() const noexcept { return error_; }
     [[nodiscard]] const std::string& session() const noexcept { return session_; }
 
@@ -220,6 +233,8 @@ private:
     std::uint64_t epoch_{0};
     std::string session_;
     std::uint64_t seek_target_{0};
+    std::uint64_t previous_sequence_{0};
+    std::uint64_t missing_{0};
     bool corrupt_{false};
     std::string error_;
 };

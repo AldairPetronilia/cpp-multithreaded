@@ -86,6 +86,9 @@ struct ReplaySnapshot {
 
 struct SystemSnapshot {
     double uptime_s{};
+    // Where the charts' time axis stands: the uptime when live, and for a replay the position
+    // in the recording, so a replay's charts show recorded time however fast it runs.
+    double timeline_s{};
     bool running{};
     std::vector<ProducerStats> feeds{};
     std::vector<SignalProcessorStats> strategies{};
@@ -130,6 +133,9 @@ public:
     void stop();
     [[nodiscard]] bool feeds_finished() const;
     [[nodiscard]] SystemSnapshot snapshot() const;
+    // Waits until every strategy has handled the quotes it had been given, so the signals
+    // those quotes trigger are published (and journaled). False on timeout.
+    bool drain_strategies(std::chrono::milliseconds timeout);
 
     // Runtime controls used by the dashboard. A feed name of "*" addresses every feed.
     // They return false when no component has the given name.
@@ -175,6 +181,8 @@ private:
     std::string session_;
     // Declared first so it outlives every component that subscribes to or publishes on it.
     EventBus bus_;
+    // Rung by supervised workers as they die. Null when nothing supervises them.
+    std::shared_ptr<Doorbell> doorbell_;
     std::unique_ptr<JournalWriter> journal_;
     std::shared_ptr<MockTradingApi> mock_api_;
     std::unique_ptr<GatewayPool> gateway_;
