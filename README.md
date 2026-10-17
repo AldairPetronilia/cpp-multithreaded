@@ -2,14 +2,23 @@
 
 A small C++20 trading pipeline that demonstrates genuinely parallel event processing,
 bounded asynchronous messaging, topic-partitioned market data for multiple independent
-strategies, and one shared rate-limited API gateway, with a live browser dashboard. It
-uses only the C++ standard library, POSIX sockets for the dashboard, and CMake. All
-prices, orders, failures and fills are simulated.
+strategies, and a pool of rate-limited API gateways, with a live browser dashboard. On top
+of that it demonstrates **recovery and replay**: every event is journaled to disk, a
+supervisor replaces workers that crash or hang and rebuilds their state from the journal,
+orders survive failures exactly once, and any recorded session can be replayed and checked
+against what was recorded. It uses only the C++ standard library, POSIX sockets for the
+dashboard, and CMake. All prices, orders, failures and fills are simulated.
 
 ```sh
 cmake -S . -B build && cmake --build build --parallel
 ./build/trading_demo --dashboard          # then open http://127.0.0.1:8080
 ```
+
+With `--dashboard` the journal, the supervisor and two API gateways are on. Click any
+thread or the gateway pool in the pipeline diagram (or use the buttons in the Resilience
+card) to crash, hang or poison it or take a gateway down, and watch the system recover.
+Press **Watch a replay** to replay the session so far.
+After a run, `./build/trading_demo --replay journal/<session>` replays it in a new process.
 
 ## What the system does
 
@@ -28,10 +37,13 @@ flowchart LR
     T4 & T5 --> S2[trend-fx mailbox + thread]
     T1 & T4 --> S3[levels mailbox + thread]
     S1 & S2 & S3 -->|TradingSignal| E[Order execution]
-    E -. non-blocking submit .-> G[Shared API gateway: one token, sliding-window limit]
+    E -. non-blocking submit .-> G[API gateway pool: one credential and limiter each]
     G -->|I/O threads| B[Mock broker API]
     G -->|ExecutionReport| P[Position monitor]
     bus -. every event .-> R[Dashboard tap]
+    bus -. every event .-> J[(Journal)]
+    J -. recover and replay .-> S1 & S2 & S3 & E & P
+    SUP{{Supervisor}} -. probes, replaces, fences .-> S1 & S2 & S3 & E & P & EQ & FX
 ```
 
 - **Feeds** are threads that publish one quote per instrument per round, each instrument
@@ -45,6 +57,10 @@ flowchart LR
 - **Position monitor** applies execution reports per strategy and symbol.
 - **Dashboard tap** is an ordinary subscriber to every event type. It shows that adding
   an observer needs no change to any other component.
+- **Journal** is another ordinary subscriber: it appends every event to a durable log
+  that recovery and replay read back ([Journal](#journal)).
+- **Supervisor** is one thread that probes every worker and replaces the ones that fail
+  ([Resilience](#resilience-and-recovery)).
 
 The default topology is defined in `SystemConfig::demo()`. It can be replaced from the
 command line (see [Configuration](#configuration)).
@@ -67,6 +83,21 @@ Events and shows:
   with trends. Stages run from bus to handler per worker, through gateway queueing,
   rate-limit wait and broker round trip, to market data → position.
 - **Tape and positions.** P&L is marked to the last price.
+- **Incident timeline.** One lane per thread and gateway over the last minute: how long
+  each fault went unnoticed, how long its replacement took, and when it was back. Below it,
+  the last incident broken into those phases with their real durations.
+- **Order integrity.** Signals, orders, broker calls, fills and rejections side by side,
+  with three checks that hold through every failure: nothing was dropped on the order
+  path, no signal has two outcomes, and every signal without an outcome yet is in a queue.
+  The snapshot reads its counters one after another, so a check fails only once it has
+  failed for a full second; a real loss or double count never goes away.
+- **Supervisor log.** Each fault with how long it had been there when it was noticed, and
+  each replacement with how long it took.
+
+During a replay, prices, signals, the tape and the timeline run on recorded time, so a
+replay at 10× still shows the recording's own spacing. A playback also shows the
+recording's incidents. Gateway outages and slow handlers are not in the supervisor's log;
+the page records them from the snapshots it receives, so they start when it was opened.
 
 The controls act on the running process. You can:
 - change the feed rate or pause a feed;
@@ -83,6 +114,193 @@ The server binds to loopback only. It rejects requests whose `Host` or `Origin` 
 loopback, as protection against DNS rebinding and cross-site use of the controls. It
 never sees credentials. Every table has a table-view twin, and colours follow a
 palette validated for colour-vision deficiency in light and dark themes.
+
+## Resilience and recovery
+
+The goal is bounded, measured recovery, not a claim of zero downtime: a failed component
+is detected within a configurable time, replaced without waiting for it, and its state is
+rebuilt before it takes traffic again. The order path is **exactly once**: through every
+failure below, signals, orders, broker calls and fills stay equal, and nothing is sent
+twice.
+
+**What can fail, how it is noticed, what happens**
+
+| Failure | Detected by | Recovery |
+|---|---|---|
+| A handler throws | caught per event (unchanged) | the event is skipped and counted |
+| A worker thread dies | the dying thread rings the supervisor's doorbell (about 0.1–0.2 ms) | replaced; state rebuilt from the journal |
+| A worker hangs (deadlock, endless loop) | work is waiting and nothing completes for `stall_timeout`, or a handler runs past `handler_deadline` with nothing queued behind it | the thread is abandoned, not joined; a replacement takes over |
+| Every event throws (poison) | consecutive handler failures reach a threshold | replaced; the poison event is dead-lettered |
+| A replacement cannot rebuild its state | its recovery throws before it goes live | it dies instead of going live, and is tried again within the restart budget |
+| A feed thread dies | the feed marks itself crashed | a replacement resumes the sequence numbers and prices |
+| An API gateway's connection drops | the request fails with a connection error | that request moves to another gateway at once, under the same idempotency key |
+| An API gateway keeps failing | per-gateway circuit breaker | ejected; new orders go to another gateway |
+| The journal cannot write (full disk, I/O error) | a write or sync fails | it stops at a clean prefix and counts what it lost; recovery refuses to rebuild from it |
+| A component keeps failing | more than 3 restarts in 10 s | quarantined: left down, loudly, while the rest keeps running |
+| Too many abandoned threads are still stuck | zombie count | the process exits non-zero for an external restarter |
+
+A segfault or the machine dying is **not** covered: threads share an address space, so
+recovering from that needs another process. See [Not done](#not-done-and-known-limits).
+
+**Hung is not idle.** An empty mailbox with no handler running is idle and never trips
+anything. A worker is stalled if its mailbox holds work and its processed count has not
+moved for `stall_timeout` (300 ms), or if one handler has run for `handler_deadline` (1 s)
+with nothing queued behind it, so a worker hung on the last event before the market went
+quiet is not left alone. Half of either limit without progress marks the worker
+`degraded`, a warning, not a restart: a slow handler still makes progress, and restarting
+it would only add load.
+
+**A replacement that cannot rebuild is not live.** Recovery runs on the replacement's own
+thread before it takes traffic. If it throws (the journal failed, fell behind or is
+damaged), the replacement dies and the supervisor reports `recovery-failed` instead of a
+restart, then tries again within the restart budget. It never goes live on a partial
+history.
+
+**C++ cannot kill a thread.** A stuck worker is therefore *abandoned*: unsubscribed from
+the bus, its mailbox closed, its thread left running, and the object it runs on kept alive
+in a graveyard until the thread finishes by itself. A zombie that never finishes is
+leaked at exit rather than waited for. It is also **fenced**: every write a component
+makes (publishing a signal, submitting an order) goes through a `GenerationGate` that
+checks the generation and performs the write under one shared lock, and `advance()` takes
+that lock exclusively. A flag checked before writing would not be safe, because a thread
+can pause between the check and the write. Once `advance()` returns, the stale instance is
+not inside a write and cannot start one. When a hung thread wakes up later it finds it
+cannot publish; the dashboard counts those blocked writes.
+
+**State is rebuilt from the journal, silently.** A replacement subscribes first, so live
+events buffer, then replays the journal into its strategy before it goes live. Signals
+during that replay are discarded: they were either already published or are too old to
+trade on, which matches the system's "act on the freshest quotes" policy. The overlap
+between the journal and the mailbox is skipped by per-symbol sequence number. Mailboxes
+are treated as disposable caches of the journal; a dead worker's mailbox is never rescued.
+
+**The order path asks before it resends.** A replacement execution worker finds every
+journaled signal that has no execution report, then asks the broker side before sending
+anything: *in flight* in the gateway means skip, *already completed* at the broker means
+publish the stored outcome, *unknown* means resubmit (or, if the signal is older than
+`stale_signal_after`, publish an "expired" rejection rather than trade on it). A venue's
+duplicate window is only as good as the venue's, so the idempotency key alone is not
+trusted. Order ids are causal, `<session>:<strategy>:<symbol>:<quote sequence>`, so a
+restarted or replayed strategy produces the same id for the same input, and the position
+book applies each filled order id once (`ApplyResult::duplicate` otherwise). It also
+counts each rejection once, and an order that filled cannot then also be rejected.
+
+**The position book is its own checkpoint.** It outlives the monitor, so a replacement
+monitor reapplies only the newest journaled reports (half the book's 65,536-id dedupe
+window), and the book recognises the ones it already has by order id. Reapplying the whole
+history would lean on that window, and past 65,536 fills the oldest would count twice. The
+fills and rejections recovery adds are counted as the monitor's own, so signals, orders
+and outcomes still reconcile after a restart.
+
+**Gateway pool.** `GatewayPool` implements the same `IRequestManager` interface the order
+path already used, so execution did not change. Each gateway has its own credential,
+limiter and I/O threads. By default all orders go to the first healthy gateway, so the pool
+never offers more than one credential's rate limit; `--gateway-spread` spreads across them
+only for providers that limit per credential. Failover is by request: a hard failure
+(connection error, timeout, 5xx) re-routes that request once, within a pool-wide retry
+budget so a failing fleet cannot multiply its own load. Only a request the broker can
+deduplicate (idempotent, with a key) is re-routed: a timeout or a dropped connection does
+not say whether the first attempt executed, so anything else fails visibly instead. A
+dropped connection is not retried through the same gateway after a backoff; it fails over
+at once, which removed a 1.1 s order-latency spike measured with a gateway down. Cancelling
+a re-routed order cancels the attempt standing in for it. The gateways already retry
+internally, so a re-route is not another retry layer. HTTP 429 means slow that gateway
+down, which it does by itself; it is never a reason to fail over. A gateway that keeps
+failing is ejected with exponential, jittered backoff, then given one probe request at a
+time and must succeed twice before it takes traffic again. The last healthy gateway is
+never ejected. This assumes the broker's idempotency keys are not scoped per credential;
+the mock's are shared, and a real provider has to be checked.
+
+## Journal
+
+Every event that crosses the bus is appended to a durable log by one writer thread that
+is an ordinary subscriber, so publishers never wait for the disk.
+
+- **Format.** A session is a directory of segment files (`seg-<first sequence>.jnl`, 16 MiB
+  by default). Each record is `length | CRC-32 | sequence | wall-clock ns | kind | topic
+  name | payload`. The CRC is seeded with a random per-segment epoch, so leftover bytes in
+  a recycled file never validate. Topics are stored by name because topic ids are interned
+  per process, and times are wall-clock because the bus's steady-clock times mean nothing
+  after a restart. Payloads carry a schema version.
+- **Durability.** Buffered records reach the OS every 20 ms, which survives the process
+  being killed, and reach the disk every second, which survives power loss. On macOS plain
+  `fsync` does not flush the drive's cache; `JournalSettings::full_fsync` uses
+  `F_FULLFSYNC`, which is slow and unmeasured here.
+- **Crash safety.** On reopening, a short last record (a crash mid-append) is truncated. A
+  complete record that fails its checksum with data after it is different: the segment is
+  set aside as `.corrupt` and a new one started, never silently trimmed. The two cases
+  differ because discarding everything after a bad record destroyed good data in other
+  systems.
+- **Overflow is visible.** The tap's mailbox is large and rejects instead of evicting. If
+  it ever overflows, the journal records a **gap** marker with the number of events lost,
+  so a replay is visibly incomplete instead of silently wrong.
+- **Failure is visible.** If a write or sync fails (a full disk, an I/O error), the journal
+  stops writing, so what it holds stays a clean prefix, and counts the records it could not
+  keep. Recovery refuses to rebuild state from a failed journal, and a reader reports
+  records missing between the ones it returns, so a session with a hole is never treated
+  as complete.
+- **Manifest.** `manifest.txt` records the topology (feeds, strategies) next to the
+  segments, so a later process can replay the session without being told it again.
+
+## Replay
+
+`ReplayFeed` is a publisher that reads the journal instead of generating quotes. It plugs
+in where the live feeds do, so everything downstream is exactly the code that ran live.
+
+- **Re-derive** publishes only the recorded market data and lets the strategies decide
+  again, against a mock broker of the replay's own. The recorded signals are the answer
+  key: the verifier compares them with what the replay derives, identifying a signal by
+  strategy, symbol, triggering-quote sequence and side, and requiring its quantity and
+  price to match too. Each signal is counted as often as it occurs, so a repeat cannot
+  hide an absence. The verdict is `match`, `explained` (every difference is on a quote that
+  arrived while its strategy was down, between the fault and the replacement going live:
+  a restarted strategy skips the signals those quotes triggered), `diverged`, or
+  `not-comparable` (the replay was moved, so strategies started cold).
+- **Where a dashboard replay stops.** It replays the session up to the moment it was
+  started, after the strategies have handled the quotes they had, so every signal those
+  quotes trigger is already journaled and the answer key is complete.
+- **Playback** publishes everything as recorded, signals and fills included. Nothing is
+  recomputed: no strategies run and no orders are sent, and recorded fills rebuild the
+  positions.
+- **Pacing.** *Realtime* reproduces the recorded spacing divided by a speed, compressing
+  recorded silences; consumers may shed under load, as they do live, and the dashboard
+  says so. *Lockstep* waits for the consumers to drain after every few records, so no
+  quote is ever shed and a re-derivation is exact, at whatever speed the consumers allow,
+  even with mailboxes smaller than the batch.
+- **Safety.** A replay system has its own bus, mock broker and gateway; it writes no
+  journal and is not supervised, so it can run beside the live system and cannot reach a
+  real broker or re-record itself. This is decided when it is built, not by a flag checked
+  at run time.
+- **Controls.** Pause, resume, speed, seek and stop, from the dashboard or the controls
+  below. A replay that reaches the end waits there, so it can still be moved back.
+
+## Breaking things from the dashboard
+
+Click a thread in the pipeline diagram, or the gateway pool, for a menu of what can be
+broken; the **Resilience** card has the same actions as buttons. `Crash` kills the
+thread. `Hang 8 s` blocks the handler for eight seconds, so you see work pile up, the
+supervisor abandon and replace the worker, and the old thread wake up later and find it
+can no longer write. `Poison` makes every event throw. Gateways have `Take down`. The
+incident timeline and the **Supervisor log** show what happened and how long each phase
+took, **Order integrity** shows that every signal still has exactly one outcome, the
+pipeline diagram marks the affected node (amber while restarting, green for a few seconds
+after), and the **Journal & replay** card starts, pauses, speeds up, seeks and stops a
+replay and shows its verification.
+
+The same controls are plain HTTP, which is how the tests and scripts drive them:
+
+```text
+POST /api/control?name=fault.crash:trend-fx&value=1
+POST /api/control?name=fault.hang:trend-tech&value=8000      (hang for 8000 ms)
+POST /api/control?name=fault.poison:levels&value=1
+POST /api/control?name=fault.gateway:0&value=1                (1 = down, 0 = up)
+POST /api/control?name=replay.start:rederive&value=max        (or playback; a speed, or max)
+POST /api/control?name=replay.pause&value=1                   (also replay.speed, replay.seek 0-1000, replay.stop)
+POST /api/control?name=view.show&value=live                   (or replay)
+```
+
+Component names are the feed and strategy names plus `order-execution` and
+`position-monitor`. Feeds can only crash.
 
 ## Architectural decisions
 
@@ -140,14 +358,20 @@ Workers drain up to 64 events per lock acquisition. Publishers only signal a con
 that is actually parked.
 
 **Delivery guarantees:**
-- At most once, in memory, to every subscriber registered when the event is published.
-- Events from one publisher on one topic keep their order in each mailbox.
-- Nothing survives a crash.
+- Live, at most once, in memory, to every subscriber registered when the event is
+  published. Events from one publisher on one topic keep their order in each mailbox.
+- Every event is also journaled, so a restarted component can rebuild from it. On the order
+  path that makes delivery at-least-once, with idempotent consumers (order ids are broker
+  idempotency keys, the position book applies each id once) giving effectively-once.
+- A process crash loses what has not reached the OS (at most about 20 ms of events) and,
+  with the mock broker, the broker's own state, which lives in the process.
 
-### Shared API gateway
+### API gateways
 
-Every worker receives the same `IRequestManager&` from the composition root. `submit()`
-only enqueues into a bounded queue and returns a cancellable handle. I/O threads then:
+Every worker receives the same `IRequestManager&` from the composition root: a
+`GatewayPool` of one or more `ApiRequestManager`s ([Resilience](#resilience-and-recovery)
+covers the pool). `submit()` only enqueues into a bounded queue and returns a cancellable
+handle. A gateway's I/O threads then:
 - wait on one exact **sliding-window limiter**, which never allows a burst above N per
   window;
 - honour HTTP 429 `Retry-After` for all threads at once;
@@ -211,6 +435,41 @@ injected snapshot provider returns and forwards controls to an injected handler.
     - The exit code no longer treats designed market-data shedding as failure.
     - CMake defaults to a Release build.
 
+## Review findings fixed in the resilience revision
+
+The resilience work was reviewed file by file, and by two independent reviews aimed at
+correctness and at the recovery goals. Every finding was checked against the code and
+held. Each fix has a regression test.
+
+1. **Fills counted twice after a long session.** A restarted position monitor replayed the
+   whole journal into the book, whose dedupe window holds 65,536 order ids; past that, old
+   fills applied again. It now reapplies only the newest reports.
+2. **A failed recovery reported as healthy.** A replacement whose state rebuild threw still
+   went live and was logged as a restart. It now dies, is logged as `recovery-failed`, and
+   is tried again within the restart budget.
+3. **A hang nobody caught.** A worker hung on its last event, with nothing queued behind
+   it, looked idle forever. A handler running past `handler_deadline` is now a stall.
+4. **Silent journal failures.** Write and sync errors were ignored. The journal now stops
+   at a clean prefix, counts what it lost, and recovery refuses to rebuild from it.
+5. **Unsafe re-routes.** The pool re-sent requests the broker could not deduplicate. Only
+   idempotent requests with a key move now, and cancellation follows them.
+6. **False replay verdicts.** A missing signal could hide behind a repeated one, order
+   fields were not compared, and any difference on a restarted strategy counted as
+   explained. Signals are now counted, quantity and price must match, and only quotes that
+   arrived during an outage explain a difference.
+7. **Slow reaction to crashes and dropped connections.** A crash waited up to 20 ms for the
+   next probe; a dying thread now rings the supervisor at once. A dropped gateway
+   connection waited out a backoff before failing over (a 1.1 s order-latency spike); it
+   now fails over at once.
+8. **Outcomes recovered but not counted.** Found by the dashboard's order-integrity panel:
+   after a position-monitor crash, the fills it had missed were applied to the book from the
+   journal but not counted, and rejections it had missed were dropped, so signals and
+   outcomes no longer reconciled although every position was right. Recovery now reports
+   what it applied and the monitor counts it, and the book counts each rejection once.
+9. **Replay rough edges.** A finished replay can still be moved back; a dashboard replay
+   stops at a point where every signal its quotes trigger is already journaled; lockstep
+   stays lossless with mailboxes smaller than its batch.
+
 ## Configuration
 
 ```sh
@@ -234,9 +493,24 @@ Other options set:
 - mock latency, 429 and failure injection;
 - retries and the drain timeout.
 
+Durability, recovery and replay:
+
+```sh
+./build/trading_demo --journal journal --supervise --gateways 2   # a batch run with all of it
+./build/trading_demo --replay journal/<session> --replay-speed max # verify a recording
+./build/trading_demo --replay journal/<session> --replay-mode playback --dashboard
+```
+
+`--journal DIR`, `--supervise` and `--gateways N` are on by default with `--dashboard`
+(`--no-journal` and `--no-supervise` turn them off). `--stall-timeout-ms` sets how long
+waiting work may go without completing, `--journal-fsync-ms` how often the journal is
+synced to disk, and `--session NAME` names a run. `--replay-mode` is `rederive` (default)
+or `playback`, and `--replay-speed` a multiple of the recorded pace or `max` for lockstep.
+
 Without `--dashboard` the demo publishes 3,000 quotes per instrument, drains, prints a
-summary and exits. It exits non-zero if an order, signal or report was lost or any
-component failed.
+summary and exits. It exits non-zero if an order, signal or report was lost, a component is
+quarantined, a replay diverges, or any error went unrecovered; faults the supervisor
+recovered from do not count. It exits 3 if the supervisor escalates.
 
 ## Build, test, benchmark
 
@@ -253,13 +527,29 @@ cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DTRADING_ENABLE_TSAN=ON
 cmake --build build-tsan --parallel && ./build-tsan/trading_tests
 ```
 
-The 26 tests cover:
+The 69 tests (26 original, 43 for resilience) and four smoke runs (a supervised recording,
+then replay and playback of that recording in separate processes) cover everything below.
+The resilience tests prove behaviour under failure: the journal's torn-tail and damage
+handling, the fencing barrier, a zombie thread unable to publish, exactly-once order
+recovery, reconciliation against a broker that already holds the orders, gateway failover
+and failback, every fault the supervisor handles, restart-budget quarantine, a feed
+resuming its sequence, a clean run reproduced by replay with every signal and position
+matching, and the dashboard controls. Those added with the review fixes below cover a
+worker hung on its last event, position recovery past the dedupe window, a replacement
+that cannot rebuild, the crash doorbell, a hung position monitor fenced off the book, the
+pool resending only what the broker can deduplicate, forwarding cancellation and failing
+over at once, missing journal records, verification by count and order fields, outage
+windows, and seeking a finished replay with one-slot mailboxes. The test that crashes both
+the execution worker and the position monitor now also demands that every signal has
+exactly one counted outcome; without the fix in finding 8 it fails 3 runs out of 3.
+
+The original tests cover:
 - **Messaging:** fan-out and type filtering, topic routing, unsubscribe, concurrent
   publishers with per-publisher ordering, both overflow policies, batching and close.
 - **Metrics:** histogram precision and interval deltas.
 - **Strategies:** both strategies' signal logic.
 - **Isolation:** a slow strategy does not delay others on the same topic.
-- **Orders and positions:** unique order IDs across strategies, thread-safe positions.
+- **Orders and positions:** unique, causal order IDs across strategies, thread-safe positions.
 - **API gateway:** shared rate limiting across submitters, a slow API not blocking
   market data, idempotency-gated retries, `Retry-After` and timeouts, cancellation,
   drain timeout, concurrent shutdown, the mock's bounded deduplication window.
@@ -276,10 +566,40 @@ These are measured on an Apple M3 Max (10 performance and 4 efficiency cores), m
 26, Apple clang 21, Release build. Results vary with hardware, OS scheduling and load.
 Percentiles come from the histogram and are within about 3%.
 
-Tests: 26/26 pass. Under ThreadSanitizer, 26/26 pass with 0 reports on each of 5 runs.
-The full demo under ThreadSanitizer, with the dashboard streaming and every control
-exercised, also reported 0. The suite passed 30 of 30 runs with three copies running in
-parallel for CPU contention.
+Tests: 69/69 pass. Under ThreadSanitizer, 69/69 pass with 0 reports in 6 of 6 runs (three
+after the review fixes, three after the position-accounting fix). The earlier 56-test suite
+passed 9 of 9 ThreadSanitizer runs, including three copies in parallel, and the original
+26 tests passed 5 of 5 before any resilience work.
+
+**Recovery and replay** (same machine, release build, a live demo at about 5,000 events/s):
+
+| Measurement | Result |
+|---|---|
+| Strategy crash, replacement ready | 10 ms after replaying 23,560 quotes |
+| Strategy hang, stall detected and replacement ready | 304 ms of stall, then 14 ms to replace and replay 36,273 quotes |
+| Replaying 462,718 quotes into a replacement, from a journal of 1.2 M records (about 4 minutes) | 183 ms |
+| Execution crash, one unreported signal reconciled and resent | 36 ms |
+| Journal while recording at 5,000 events/s | records equal bus events exactly, no gaps (10,018 of 10,018) |
+| Lockstep replay of a 257,693-record session (257,195 quotes) | 0.39 s, no quote shed |
+| Lockstep replay of 1.2 M records | 2.0 s |
+| One run with a crash, a hang, a poison, a feed crash, an execution crash and a gateway outage | 167 signals = 167 orders = 167 broker calls = 167 fills; 0 duplicates, 0 rejections |
+| Re-deriving that battered session | verdict `explained`: 244 of 245 signals matched, the one extra on a restarted strategy |
+| Strategy crash, noticed (doorbell) and replaced, after the review fixes | noticed after 161 µs, replaced in 10.6 ms after replaying 23,084 quotes |
+| Strategy hang, after the review fixes | noticed after 310 ms of stall, replaced in 15.5 ms after replaying 37,812 quotes |
+| Position monitor crash | noticed after 118 µs, replaced in 13.0 ms; 2 fills it missed reapplied from the journal |
+| Execution poisoned | replaced in 30.1 ms; 6 unreported signals checked with the broker and resent |
+| One dashboard run with all four of those and a 2.5 s gateway outage | 253 signals = 253 orders = 253 broker completions = 253 fills = 253 fills in the book; 5 orders re-routed |
+
+Recovery time grows with the length of the session, because a replacement replays the
+journal from its start. The 183 ms above was a four-minute session; the cost is linear, so
+about 3 s after an hour at this rate. See [Not done](#not-done-and-known-limits).
+
+The messaging benchmark is unchanged by this revision: against the original commit, built
+and run side by side, the two agreed within 1-3% on the quiet runs (fan-in, fan-out and
+topic-partitioned), although `EventWorker` gained per-event bookkeeping. After the review
+fixes, against `main` (the commit before any resilience work), five alternating runs each
+gave medians that differed by −6% to +13% with no consistent direction, which is
+run-to-run noise here, and the same paced publish-to-handler latency (p50 2.4 µs).
 
 **Before and after, same workload** (400k events, saturated, median of 5, deliveries/s):
 
@@ -355,11 +675,22 @@ include/trading/strategies.hpp src/strategies.cpp Threshold and EMA-cross strate
 include/trading/workers.hpp   src/workers.cpp     Feeds, processors, execution, positions, tap
 include/trading/api.hpp       src/api.cpp         Shared gateway, limiter, retries, mock broker
 include/trading/system.hpp    src/system.cpp      Composition root and lifecycle
+include/trading/journal.hpp   src/journal.cpp     Event codec, journal writer and reader, manifest
+include/trading/replay.hpp    src/replay.cpp      Replay feed and the verifier that checks it
+include/trading/resilience.hpp src/resilience.cpp Supervisor, health checks, graveyard, controlled strategy
+include/trading/components.hpp src/components.cpp Supervised strategy, execution, position and feed components
+include/trading/gateway_pool.hpp src/gateway_pool.cpp  Gateway pool, circuit breakers, fault-injecting client
+include/trading/fencing.hpp                       Generation gate (sink-side fencing)
+include/trading/fault.hpp                         One-shot fault injection for workers
+include/trading/session.hpp   src/session.cpp     Live system plus an optional replay system; control routing
+include/trading/control.hpp                       Control result type
 include/trading/telemetry.hpp src/telemetry.cpp   JSON snapshot rendering
 include/trading/dashboard_server.hpp src/dashboard_server.cpp  HTTP + SSE server (POSIX)
 include/trading/config.hpp    src/config.cpp      Command-line configuration
 cmake/embed_page.cmake        Embeds the dashboard page
-tests/tests.cpp               Tests
+tests/tests.cpp               Original tests
+tests/resilience_tests.cpp    Journal, fencing, recovery, gateway pool, supervision and replay tests
+tests/check.hpp               Test helpers
 bench/benchmark.cpp           Benchmarks
 ```
 
@@ -372,11 +703,36 @@ bench/benchmark.cpp           Benchmarks
 - **More strategies.** Add a `--strategy` or a new `ISignalStrategy`. A strategy that
   needs more than one core can be split by symbol, each part with its own processor and
   topics, which preserves per-symbol order.
-- **Multiple API tokens.** Create one `ApiRequestManager` per token, each with its own
-  limiter, and inject the right one, or route by account, without putting credentials
-  in events.
+- **Spreading orders across credentials.** `--gateway-spread` does it; check first that
+  the provider limits per credential and that its idempotency keys are not scoped to one.
 - **New event types and workers.** An event is an aggregate with a `kEventName`; a
   worker is an `EventWorker` plus a handler. The bus does not change.
 - **Multiple processes.** Bridge selected topics to a durable broker at an adapter.
   That needs schemas, idempotency and replay policy. The in-process bus should not be
   presented as distributed messaging.
+
+## Not done, and known limits
+
+These were considered and left out, so that nothing here is claimed that is not built.
+
+- **Surviving the process dying.** A segfault, an out-of-memory kill or the machine going
+  away takes every thread with it. The journal makes a cold restart possible (it reopens,
+  repairs its tail and continues its sequence), but a process-level `--resume`, and a hot
+  standby that tails the journal and takes over a lease, are not built. A lease on a file
+  lock would only fence one host and would not stop a paused leader that still holds a
+  broker connection; that needs an epoch checked at the gateway or broker on every order.
+- **A/B market-data line arbitration.** A crashed feed is replaced and resumes its
+  sequence, but two redundant feed lines merged by sequence number are not built.
+- **Recovery time grows with the session.** A replacement replays the journal from the
+  start, which keeps its state exact. Bounding it needs strategy state checkpoints
+  (`save`/`restore` on `ISignalStrategy`, stored with a journal offset), not a shorter
+  window: a threshold strategy's anchor is the first price it saw, so a window would
+  change its decisions.
+- **The mock broker lives in the process.** Reconciliation against it is real, but its
+  state would not survive a process restart as a real broker's would.
+- **Recovering a feed does not replay what was missed.** A crashed feed leaves a gap in
+  the quotes during the outage; the replacement resumes from its last round.
+- **A hung thread that never wakes up is leaked,** and past eight of them the supervisor
+  asks for the process to exit. The leak is bounded by that, not eliminated.
+- **A signal that fired while a strategy was down is not traded** when it comes back; that
+  is deliberate, and the replay's `explained` verdict accounts for it.

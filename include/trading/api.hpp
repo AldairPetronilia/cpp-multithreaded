@@ -59,10 +59,29 @@ struct ApiResponse {
     }
 };
 
+// What the broker side knows about an order identified by its idempotency key. Recovery
+// asks before resubmitting, because a duplicate window is only as good as the venue's.
+enum class OrderLookup {
+    unknown,
+    in_flight,
+    completed,
+};
+
+struct OrderLookupResult {
+    OrderLookup state{OrderLookup::unknown};
+    // Valid when state is completed: the response the broker stored for the order.
+    ApiResponse response{};
+};
+
 class IApiClient {
 public:
     virtual ~IApiClient() = default;
     virtual ApiResponse perform(const ApiRequest& request, std::stop_token cancellation) = 0;
+    // Clients without a status query report every order as unknown.
+    [[nodiscard]] virtual OrderLookupResult lookup(const std::string& idempotency_key) {
+        static_cast<void>(idempotency_key);
+        return {};
+    }
 };
 
 struct RateLimitConfig {
@@ -77,6 +96,9 @@ struct ApiManagerConfig {
     std::size_t max_retries{2};
     std::chrono::milliseconds initial_retry_backoff{20};
     std::chrono::milliseconds max_retry_backoff{500};
+    // A gateway in a pool turns this off: a connection that failed is better retried through
+    // another gateway at once than through the same one after a backoff.
+    bool retry_connection_failures{true};
 };
 
 enum class SubmitStatus {
@@ -99,6 +121,9 @@ public:
     void cancel() const;
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] std::uint64_t id() const noexcept;
+    // Stops once the request is cancelled, so cancellation can be forwarded to another
+    // request standing in for this one.
+    [[nodiscard]] std::stop_token token() const noexcept;
 
 private:
     friend class ApiRequestManager;
@@ -121,6 +146,12 @@ class IRequestManager {
 public:
     virtual ~IRequestManager() = default;
     virtual SubmitResult submit(ApiRequest request, ApiCompletion completion) = 0;
+    // Reports whether a request with this idempotency key is queued or running here, or
+    // already completed at the broker. Managers without that knowledge report unknown.
+    [[nodiscard]] virtual OrderLookupResult lookup(const std::string& idempotency_key) {
+        static_cast<void>(idempotency_key);
+        return {};
+    }
 };
 
 enum class ApiShutdownMode {
@@ -166,6 +197,7 @@ public:
     ApiRequestManager& operator=(const ApiRequestManager&) = delete;
 
     SubmitResult submit(ApiRequest request, ApiCompletion completion) override;
+    [[nodiscard]] OrderLookupResult lookup(const std::string& idempotency_key) override;
 
     // Stops accepting requests and waits for accepted ones to finish. In drain mode,
     // requests still outstanding after drain_timeout (if given) are cancelled.
@@ -193,6 +225,7 @@ public:
     explicit MockTradingApi(MockApiConfig config = {});
 
     ApiResponse perform(const ApiRequest& request, std::stop_token cancellation) override;
+    [[nodiscard]] OrderLookupResult lookup(const std::string& idempotency_key) override;
     [[nodiscard]] std::uint64_t invocation_count() const noexcept;
 
     // Runtime fault injection for the dashboard; takes effect on the next call.

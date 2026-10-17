@@ -144,10 +144,98 @@ td { padding: 5px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap
 tr:last-child td { border-bottom: 0; }
 td.r, th.r { text-align: right; }
 td .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
-td svg.spark { width: 110px; height: 22px; display: block; }
+td svg.spark { width: 72px; height: 22px; display: block; }
+#latency-table td:first-child { white-space: normal; }
+#latency-table td, #latency-table th { padding-left: 6px; padding-right: 6px; }
 .up { color: var(--up); }
 .down { color: var(--down); }
 .status-icon { font-size: 12px; }
+
+/* Resilience */
+.subhead { font-size: 12px; font-weight: 650; color: var(--ink-2); margin: 14px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+.stack-list { display: grid; gap: 8px; }
+.stack-list { gap: 6px; }
+.component { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(150px, 1.1fr) auto; gap: 2px 12px; align-items: center;
+  padding: 6px 10px; border-radius: 10px; background: var(--wash); box-shadow: inset 0 0 0 1.5px transparent;
+  transition: box-shadow 160ms, background-color 160ms; }
+.component .who { display: flex; flex-direction: column; min-width: 0; }
+.component .who small { color: var(--muted); font-size: 11px; }
+.component .state { display: inline-flex; align-items: center; gap: 6px; font-weight: 650; }
+.component .state .glyph { display: inline-block; min-width: 1.1em; text-align: center; }
+.component .meta { color: var(--muted); font-size: 11px; display: block; font-weight: 400; }
+.component .detail { grid-column: 1 / -1; font-size: 12px; color: var(--ink-2); }
+.component.fault { box-shadow: inset 0 0 0 1.5px var(--critical); background: rgba(208, 59, 59, 0.08); }
+.component.working { box-shadow: inset 0 0 0 1.5px var(--warning); background: rgba(250, 178, 25, 0.10); animation: pulse 1s ease-in-out infinite; }
+.component.slow { box-shadow: inset 0 0 0 1.5px var(--warning); }
+.component.recovered { box-shadow: inset 0 0 0 1.5px var(--good); }
+@keyframes pulse { 50% { box-shadow: inset 0 0 0 1.5px var(--warning), 0 0 0 4px rgba(250, 178, 25, 0.22); } }
+.fault-buttons { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.fault-buttons button { padding: 3px 9px; font-size: 12px; }
+.fault-buttons button:disabled { opacity: 0.45; cursor: default; }
+.log-glyph { display: inline-block; min-width: 1.2em; text-align: center; font-weight: 700; }
+#supervisor-log tr.has-detail td { border-bottom: 0; padding-bottom: 0; }
+#supervisor-log tr.detail-row td { padding-top: 1px; color: var(--muted); font-size: 12px; white-space: normal; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-weight: 650; font-size: 12px;
+  background: var(--surface); box-shadow: 0 0 0 1px var(--border); white-space: nowrap; }
+.progress { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+.progress > div { height: 100%; background: var(--accent); transition: width 180ms linear; }
+.replay-row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 8px 0; }
+.replay-row label { display: inline-flex; gap: 6px; align-items: center; color: var(--ink-2); font-size: 12px; }
+.replay-row select { background: var(--surface); border: 0; box-shadow: 0 0 0 1px var(--border); border-radius: 6px; padding: 3px 6px; }
+.replay-row input[type="range"] { flex: 1 1 160px; accent-color: var(--accent); }
+.primary { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 6px 12px; cursor: pointer; font-weight: 600; }
+.primary:disabled { opacity: 0.5; cursor: default; }
+.banner { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 14px; border-radius: 12px;
+  background: var(--accent-wash); box-shadow: 0 0 0 1.5px var(--accent); }
+.banner strong { letter-spacing: 0.04em; }
+.verify { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--wash); }
+.verify .counts { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px 12px; margin-top: 8px; }
+.note-line { color: var(--ink-2); font-size: 12px; margin: 6px 0 0; }
+#diagram .node-box.fault { stroke: var(--critical); stroke-width: 2.5; }
+#diagram .node-box.working { stroke: var(--warning); stroke-width: 2.5; }
+#diagram .node-box.recovered { stroke: var(--good); stroke-width: 2; }
+#diagram .hit { fill: transparent; stroke: transparent; cursor: pointer; }
+#diagram .hit:hover { stroke: var(--ink-2); stroke-width: 2; }
+
+/* Incident timeline */
+.timeline { min-height: 120px; }
+.timeline svg { display: block; width: 100%; overflow: visible; touch-action: pan-y; }
+.timeline text { font-size: 10px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.timeline .lane-label { font-size: 11px; fill: var(--ink-2); }
+#timeline-legend { margin: 6px 0 2px; }
+.incident-summary { display: grid; gap: 6px; margin: 10px 0 0; padding: 10px 12px; border-radius: 10px; background: var(--wash);
+  font-size: 12px; color: var(--ink-2); }
+.incident-summary .headline { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; font-size: 13px; color: var(--ink); }
+.phase-bar { display: flex; gap: 2px; height: 10px; }
+.phase-bar > span { display: block; height: 100%; border-radius: 3px; min-width: 3px; }
+.phase-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-variant-numeric: tabular-nums; }
+.phase-legend .key { display: inline-flex; align-items: center; gap: 6px; }
+.phase-legend .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+
+/* Order integrity */
+.ledger-flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.ledger-step { padding: 8px 10px; border-radius: 10px; background: var(--wash); display: grid; gap: 2px; min-width: 0; }
+.ledger-step .k { font-size: 11px; color: var(--muted); }
+.ledger-step .v { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.ledger-step small { font-size: 11px; color: var(--muted); }
+.checks { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+.checks li { display: grid; grid-template-columns: 1.2em minmax(0, 1fr); gap: 2px 8px; align-items: baseline; }
+.checks .glyph { text-align: center; font-weight: 700; }
+.checks small { grid-column: 2; color: var(--muted); font-size: 12px; }
+
+/* Journal and replay side by side */
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 8px 28px; align-items: start; }
+.split .subhead:first-child { margin-top: 0; }
+@media (max-width: 1100px) { .split { grid-template-columns: minmax(0, 1fr); } }
+
+/* Break-a-component menu, opened from the pipeline diagram */
+#node-menu { position: fixed; z-index: 20; background: var(--surface); color: var(--ink); border-radius: 10px; padding: 10px 12px;
+  box-shadow: 0 0 0 1px var(--border), 0 8px 24px rgba(0, 0, 0, 0.18); display: grid; gap: 8px; width: 260px; font-size: 12px; }
+#node-menu .title { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; font-size: 13px; }
+#node-menu .row { display: flex; gap: 6px; flex-wrap: wrap; }
+#node-menu p { margin: 0; color: var(--ink-2); }
+@media (prefers-reduced-motion: reduce) { .component.working { animation: none; } .progress > div { transition: none; } }
+@media (max-width: 720px) { .component { grid-template-columns: 1fr; } .fault-buttons { justify-content: flex-start; } }
 
 /* Tooltip */
 #tooltip { position: fixed; z-index: 10; pointer-events: none; background: var(--surface); color: var(--ink);
@@ -166,17 +254,19 @@ footer p { margin: 4px 0; }
 <main>
   <header class="top">
     <div class="title">
-      <h1>Trading pipeline, live</h1>
+      <h1 id="page-title">Trading pipeline, live</h1>
       <p>Feed threads publish each instrument on its own topic. Every strategy runs on its own thread
-        with its own bounded mailbox, subscribed only to its topics, and every order goes through one
-        shared, rate-limited API gateway.</p>
+        with its own bounded mailbox, and every order goes through a pool of rate-limited API gateways.
+        Every event is journaled, a supervisor replaces workers that crash or hang and rebuilds their state
+        from the journal, and any recording can be replayed.</p>
     </div>
     <span class="pill" id="connection" role="status"><span class="icon" aria-hidden="true">&#9679;</span><span>Connecting</span></span>
+    <span class="pill" id="view-pill" hidden></span>
     <span class="pill num" id="uptime">uptime &mdash;</span>
     <button class="ghost" id="theme" type="button">Theme: auto</button>
   </header>
 
-  <section class="controls" aria-label="Simulation controls">
+  <section class="controls" id="live-controls" aria-label="Simulation controls">
     <div class="control">
       <label for="feed-rate">Feed rate (rounds/s per feed) <output id="feed-rate-out">&mdash;</output></label>
       <input id="feed-rate" type="range" min="0" max="9" step="1" value="4">
@@ -206,12 +296,14 @@ footer p { margin: 4px 0; }
     </div>
   </section>
 
+  <div class="banner" id="replay-banner" role="status" hidden></div>
+
   <section class="kpis" aria-label="Headline figures" id="kpis"></section>
 
   <section class="card" aria-labelledby="pipeline-title">
     <header>
       <h2 id="pipeline-title">Pipeline</h2>
-      <small>moving dots show traffic; each strategy and worker shows its own mailbox fill</small>
+      <small id="pipeline-sub">moving dots show traffic; click any worker or the gateway pool to break it</small>
       <span class="spacer"></span>
       <div class="legend" id="strategy-legend"></div>
       <button class="ghost" id="pipeline-table-toggle" type="button" aria-pressed="false">Table</button>
@@ -225,11 +317,57 @@ footer p { margin: 4px 0; }
     <div class="table-wrap" id="pipeline-table" hidden></div>
   </section>
 
+  <div class="grid-2" id="resilience-row">
+    <section class="card" aria-labelledby="resilience-title">
+      <header>
+        <h2 id="resilience-title">Resilience</h2>
+        <small id="resilience-sub">break something and watch the supervisor replace it</small>
+        <span class="spacer"></span>
+        <span class="muted num" id="resilience-summary"></span>
+      </header>
+      <div class="timeline" id="timeline"></div>
+      <div class="legend" id="timeline-legend"></div>
+      <div class="incident-summary" id="last-incident" role="status"></div>
+      <h3 class="subhead">Threads</h3>
+      <div class="stack-list" id="components"></div>
+      <h3 class="subhead">API gateways</h3>
+      <div class="stack-list" id="gateway-list"></div>
+      <p class="note-line" id="gateway-note"></p>
+    </section>
+    <div class="stack">
+      <section class="card" aria-labelledby="ledger-title">
+        <header>
+          <h2 id="ledger-title">Order integrity</h2>
+          <small>every signal ends in exactly one outcome, through every failure</small>
+        </header>
+        <div id="ledger"></div>
+      </section>
+      <section class="card" aria-labelledby="log-title">
+        <header>
+          <h2 id="log-title">Supervisor log</h2>
+          <small>newest first: what failed, how long to notice, how long to rebuild</small>
+        </header>
+        <div class="table-wrap" id="supervisor-log"></div>
+      </section>
+    </div>
+  </div>
+
+  <section class="card" aria-labelledby="journal-title">
+    <header>
+      <h2 id="journal-title">Journal &amp; replay</h2>
+      <small id="journal-sub">every event is recorded; any recording can be played back</small>
+    </header>
+    <div class="split">
+      <div id="journal"></div>
+      <div id="replay-panel"></div>
+    </div>
+  </section>
+
   <div class="grid-2">
     <section class="card" aria-labelledby="prices-title">
       <header>
         <h2 id="prices-title">Prices and signals</h2>
-        <small>last 20 s; markers are the signals each strategy published</small>
+        <small id="prices-sub">last 20 s; markers are the signals each strategy published</small>
         <span class="spacer"></span>
         <button class="ghost" id="prices-table-toggle" type="button" aria-pressed="false">Table</button>
       </header>
@@ -239,7 +377,7 @@ footer p { margin: 4px 0; }
     </section>
     <div class="stack">
       <section class="card" aria-labelledby="limiter-title">
-        <header><h2 id="limiter-title">Shared API gateway</h2><small>one token, one sliding-window limit for every strategy</small></header>
+        <header><h2 id="limiter-title">Active API gateway</h2><small>the preferred gateway's token and sliding-window limit; the others stand by</small></header>
         <div id="limiter"></div>
       </section>
       <section class="card" aria-labelledby="latency-title">
@@ -264,11 +402,17 @@ footer p { margin: 4px 0; }
     <p>Try it: slow one strategy to 2 ms per event and watch only its mailbox fill and shed stale quotes while the
       others stay at zero; push the feed rate to max; raise broker latency or inject 429s and watch orders queue at
       the shared gateway instead of blocking any strategy.</p>
+    <p>Resilience: <em>crash</em> kills a worker thread, which rings the supervisor as it dies; <em>hang</em> makes its handler
+      block, so the supervisor sees work waiting while nothing completes, abandons the thread, fences it and starts a
+      replacement; <em>poison</em> makes every event throw. Replacements replay the journal silently (no stale orders) before
+      they go live, and the execution worker asks the broker about every order it cannot account for before resending
+      anything. Taking a gateway down moves its orders to the other one at once.</p>
     <p>Latency percentiles come from fixed-size histograms (within ~3%). Data streams from this process over
       Server-Sent Events; nothing leaves your machine.</p>
   </footer>
 </main>
 <div id="tooltip" role="tooltip" hidden></div>
+<div id="node-menu" role="dialog" aria-label="Break a component" hidden></div>
 <script>
 'use strict';
 
@@ -357,7 +501,7 @@ function refreshPalette() {
   const style = getComputedStyle(document.documentElement);
   const read = (name) => style.getPropertyValue(name).trim();
   palette = { surface: read('--surface'), muted: read('--muted'), ink2: read('--ink-2'),
-    critical: read('--critical'), axis: read('--axis') };
+    critical: read('--critical'), warning: read('--warning'), axis: read('--axis') };
   for (const slot of SERIES) palette[slot] = read(slot);
 }
 
@@ -375,9 +519,103 @@ const state = {
   seenTape: new Set(),
   tapeSeeded: false,
   renderQueued: false,
+  view: null,
 };
 
+// Which components were restarted, and when, so a recovery stays visible for a few seconds.
+const recovery = { seen: new Map(), at: new Map() };
+const recentlyRecovered = (name) => performance.now() - (recovery.at.get(name) ?? -1e9) < 5000;
+
+// Where the shown system is in time: the uptime live, the position in the recording during
+// a replay. Prices, signals, the tape and incidents are placed on this clock.
+const timelineNow = (data) => data.timeline_s ?? data.uptime_s;
+const when = (data, t) => (data.view === 'replay' ? `at ${fmt.uptime(t)} in the recording`
+  : `${Math.max(0, data.uptime_s - t).toFixed(1)} s ago`);
+
+// The supervisor logs worker threads only. Gateway outages and slow handlers are recorded
+// here from successive snapshots, so they cover the time since the page was opened.
+const OUTAGE_KEEP_S = 120;
+const outages = { open: new Map(), spans: [] };
+
+function gatewayOutage(member) {
+  if (member.down) return 'down';
+  if (member.state === 'open') return 'ejected';
+  return member.state === 'half-open' ? 'probation' : null;
+}
+
+// Times are the live system's uptime, so nothing is recorded while a replay is shown, and
+// what was recorded before is kept for the return to live.
+function trackOutages(data) {
+  if (data.view !== 'live') return;
+  const t = data.uptime_s;
+  const current = new Map();
+  for (const member of data.gateways.members) {
+    const kind = gatewayOutage(member);
+    if (kind) current.set(`gateway:${member.name}`, kind);
+  }
+  for (const component of data.resilience.components) {
+    if (component.state === 'degraded') current.set(component.name, 'slow');
+  }
+  for (const [lane, span] of outages.open) {
+    if (current.get(lane) === span.kind) continue;
+    span.end = t;
+    outages.open.delete(lane);
+  }
+  for (const [lane, kind] of current) {
+    if (outages.open.has(lane)) continue;
+    const span = { lane, kind, start: t, end: null };
+    outages.open.set(lane, span);
+    outages.spans.push(span);
+  }
+  outages.spans = outages.spans.filter((span) => span.end === null || span.end > t - OUTAGE_KEEP_S);
+}
+
+// A replay is not supervised, but the recording's own supervision events come back on its
+// tape. The tape keeps only the newest entries, so they are collected here as they pass.
+const recorded = { entries: new Map(), position: 0 };
+
+function collectRecordedSupervision(data) {
+  if (data.view !== 'replay') return;
+  if (timelineNow(data) < recorded.position - 0.5) recorded.entries.clear();  // moved back
+  recorded.position = timelineNow(data);
+  for (const entry of data.tape || []) {
+    if (entry.kind !== 'supervision') continue;
+    const split = entry.detail.indexOf(': ');
+    recorded.entries.set(`${entry.t}|${entry.strategy}|${entry.detail}`, {
+      t: entry.t, component: entry.strategy, generation: null, detect_ms: null, recovery_ms: entry.latency_ms,
+      action: split < 0 ? entry.detail : entry.detail.slice(0, split), detail: split < 0 ? '' : entry.detail.slice(split + 2),
+    });
+  }
+}
+
+// Oldest first, on the shown system's clock.
+function supervisionLog(data) {
+  if (data.view !== 'replay') return data.resilience.log;
+  const now = timelineNow(data);
+  return [...recorded.entries.values()].filter((entry) => entry.t <= now).sort((a, b) => a.t - b.t);
+}
+
 function onSnapshot(data) {
+  if (state.view !== data.view) {
+    // A different system is being shown, so its series and tape start afresh.
+    state.view = data.view;
+    state.history = [];
+    state.seenTape.clear();
+    state.tapeSeeded = false;
+    state.initial = null;
+    recovery.seen.clear();
+    recovery.at.clear();
+    recorded.entries.clear();
+    recorded.position = 0;
+    breaches.clear();
+  }
+  trackOutages(data);
+  collectRecordedSupervision(data);
+  for (const component of data.resilience.components) {
+    const before = recovery.seen.get(component.name);
+    if (before !== undefined && component.restarts > before) recovery.at.set(component.name, performance.now());
+    recovery.seen.set(component.name, component.restarts);
+  }
   state.latest = data;
   if (!state.initial && data.feeds.length) {
     state.initial = {
@@ -403,6 +641,8 @@ function onSnapshot(data) {
     signalsTotal: sum(data.strategies, (strategy) => strategy.signals),
     fillsTotal: data.position_monitor.fills,
     acceptedTotal: data.api.accepted,
+    restarts: data.resilience.restarts,
+    journalRate: data.journal ? data.journal.rate : null,
   };
   // Signals, fills and orders arrive a few per second, so per-interval rates flicker
   // between zero and a spike; a rolling window reads better.
@@ -435,9 +675,14 @@ function render() {
   setConnection(state.connection === 'reconnecting' ? 'reconnecting' : data.running ? 'live' : 'stopped');
   $('uptime').textContent = `uptime ${fmt.uptime(data.uptime_s)}`;
   renderLegends(data);
+  renderView(data);
   renderKpis(data);
   syncControls(data);
+  renderResilience(data);
+  renderLedger(data);
+  renderJournalReplay(data);
   pipeline.update(data);
+  nodeMenu.refresh();
   renderPrices(data);
   renderLimiter(data);
   renderLatency(data);
@@ -568,11 +813,29 @@ const KPIS = [
     sub: (d) => `${d.api.active} in flight · limit ${d.api.window_limit} per ${d.api.window_ms} ms`, series: (p) => p.pending },
   { id: 'fills', label: 'Fills',
     value: (d) => fmt.count(d.position_monitor.fills),
-    sub: (d) => `${fmt.count(d.position_monitor.rejections)} rejected · ${fmt.count(d.api.retries)} retries`, series: (p) => p.fills },
+    sub: (d) => `${fmt.count(d.position_monitor.rejections)} rejected · ${fmt.count(d.api.retries)} retries` +
+      (d.position_monitor.duplicates ? ` · ${fmt.count(d.position_monitor.duplicates)} duplicates ignored` : ''), series: (p) => p.fills },
   { id: 'e2e', label: 'Market data → position, p99',
     value: (d) => fmt.latency(latest(d.position_monitor.end_to_end).p99),
     sub: (d) => `p50 ${fmt.latency(latest(d.position_monitor.end_to_end).p50)} · includes gateway queueing`, series: (p) => p.e2e },
+  { id: 'recoveries', label: 'Recoveries',
+    value: (d) => fmt.count(d.resilience.restarts),
+    sub: (d) => d.resilience.supervised
+      ? `${fmt.count(d.resilience.faults)} faults · ${d.resilience.quarantines} quarantined · ${d.resilience.zombies} stuck threads`
+      : 'supervision is off', series: (p) => p.restarts },
+  { id: 'journal', label: 'Journal',
+    value: (d) => (d.replay ? fmt.count(d.replay.published) : d.journal ? fmt.count(d.journal.records) : '—'),
+    sub: (d) => (d.replay ? `replayed of ${fmt.count(d.replay.last - d.replay.first + 1)} records`
+      : d.journal ? `${fmtBytes(d.journal.bytes)} · ${fmt.rate(d.journal.rate)} · ${d.journal.gaps} gaps` : 'not recording'),
+    series: (p) => p.journalRate },
 ];
+
+function fmtBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
 
 // The most recent interval when it has samples, otherwise the cumulative figure.
 function latest(latency) { return latency.recent.count ? latency.recent : latency.all; }
@@ -772,12 +1035,55 @@ function mailboxStatus(worker) {
   return 'normal';
 }
 
+const STATE_STYLE = {
+  healthy: { glyph: '●', color: 'var(--good)', label: 'healthy' },
+  degraded: { glyph: '⚠︎', color: 'var(--warning)', label: 'slow handler' },
+  stalled: { glyph: '◼', color: 'var(--serious)', label: 'stalled' },
+  crashed: { glyph: '✕', color: 'var(--critical)', label: 'crashed' },
+  restarting: { glyph: '↻', color: 'var(--accent)', label: 'restarting' },
+  quarantined: { glyph: '⛔', color: 'var(--critical)', label: 'quarantined' },
+};
+const BREAKER_STYLE = {
+  closed: { glyph: '●', color: 'var(--good)' },
+  open: { glyph: '✕', color: 'var(--critical)' },
+  'half-open': { glyph: '◐', color: 'var(--warning)' },
+};
+
+// Marks a diagram node with its component's health, and overrides one of its text lines
+// while the component is down or has just been replaced.
+function overlayHealth(node, component, key) {
+  const rect = node.rect.classList;
+  rect.remove('fault', 'working', 'recovered');
+  if (!component) return;
+  const style = STATE_STYLE[component.state] ?? STATE_STYLE.healthy;
+  const label = node.text[key];
+  if (component.state === 'restarting') {
+    rect.add('working');
+    label.textContent = `↻ restarting: rebuilding state (gen ${component.generation + 1})`;
+    label.style.fill = style.color;
+  } else if (component.state === 'healthy' || component.state === 'degraded') {
+    if (component.state === 'degraded') {
+      rect.add('working');
+      label.textContent = `⚠︎ ${component.last_cause || 'handler running long'}`;
+      label.style.fill = style.color;
+    } else if (component.restarts > 0 && recentlyRecovered(component.name)) {
+      rect.add('recovered');
+      label.textContent = `↻ gen ${component.generation} · back after ${Math.round(component.last_recovery_ms)} ms`;
+      label.style.fill = 'var(--good)';
+    }
+  } else {
+    rect.add('fault');
+    label.textContent = `${style.glyph} ${style.label}${component.state === 'quarantined' ? ': left down' : ''}`;
+    label.style.fill = style.color;
+  }
+}
+
 const pipeline = (() => {
   const W = 1320;
   const X = { feed: 85, topic: 322, strategy: 580, execution: 810, api: 1035, broker: 1245 };
   const SIZE = {
     feed: [150, 72], topic: [140, 40], strategy: [200, 106], execution: [170, 106],
-    api: [190, 134], broker: [120, 74], position: [190, 90], recorder: [190, 90],
+    api: [190, 156], broker: [120, 74], position: [190, 96], recorder: [190, 90], journal: [190, 90],
   };
   const TOP = 44;
   const svg = $('diagram');
@@ -805,7 +1111,7 @@ const pipeline = (() => {
     const [width, height] = SIZE[kind];
     const node = { id, kind, cx, cy, width, height, left: cx - width / 2, right: cx + width / 2,
       top: cy - height / 2, bottom: cy + height / 2, text: {}, meters: {}, ...extra };
-    s('rect', { class: 'node-box', x: node.left, y: node.top, width, height, rx: 10 }, group);
+    node.rect = s('rect', { class: 'node-box', x: node.left, y: node.top, width, height, rx: 10 }, group);
     return node;
   }
 
@@ -865,7 +1171,7 @@ const pipeline = (() => {
     const headings = [
       [X.feed, 'FEEDS · one thread each'], [X.topic, 'EVENT BUS · a topic per instrument'],
       [X.strategy, 'STRATEGIES · own thread + mailbox'], [X.execution, 'EXECUTION'],
-      [X.api, 'SHARED API GATEWAY'], [X.broker, 'BROKER'],
+      [X.api, 'API GATEWAY POOL'], [X.broker, 'BROKER'],
     ];
     for (const [x, text] of headings) s('text', { x, y: 18, class: 'tiny', 'text-anchor': 'middle', text }, nodesGroup);
 
@@ -914,6 +1220,7 @@ const pipeline = (() => {
     meter(execution, nodesGroup, 'mailbox', 44);
     label(execution, nodesGroup, 'flow', 12, 68, 'small');
     label(execution, nodesGroup, 'orders', 12, 86, 'small');
+    label(execution, nodesGroup, 'status', 12, 100, 'tiny');
     nodes.set('execution', execution);
 
     const api = box(nodesGroup, 'api', 'api', X.api, centre);
@@ -924,6 +1231,8 @@ const pipeline = (() => {
     meter(api, nodesGroup, 'queue', 72);
     label(api, nodesGroup, 'flow', 12, 96, 'small');
     label(api, nodesGroup, 'status', 12, 114, 'small');
+    label(api, nodesGroup, 'gw1', 12, 132, 'tiny');
+    label(api, nodesGroup, 'gw2', 12, 145, 'tiny');
     nodes.set('api', api);
 
     const broker = box(nodesGroup, 'broker', 'broker', X.broker, centre);
@@ -937,6 +1246,7 @@ const pipeline = (() => {
     label(position, nodesGroup, 'mailbox', 12, 38, 'tiny');
     meter(position, nodesGroup, 'mailbox', 44);
     label(position, nodesGroup, 'fills', 12, 70, 'small');
+    label(position, nodesGroup, 'status', 12, 86, 'tiny');
     nodes.set('position', position);
 
     const recorder = box(nodesGroup, 'recorder', 'recorder', X.topic, bandY);
@@ -945,6 +1255,14 @@ const pipeline = (() => {
     meter(recorder, nodesGroup, 'mailbox', 44);
     label(recorder, nodesGroup, 'flow', 12, 70, 'small');
     nodes.set('recorder', recorder);
+
+    const journal = box(nodesGroup, 'journal', 'journal', X.strategy, bandY);
+    label(journal, nodesGroup, 'name', 12, 20, 'title', data.view === 'replay' ? 'Replay feed (journal reader)' : 'Journal writer');
+    label(journal, nodesGroup, 'mailbox', 12, 38, 'tiny');
+    meter(journal, nodesGroup, 'mailbox', 44);
+    label(journal, nodesGroup, 'flow', 12, 70, 'small');
+    label(journal, nodesGroup, 'status', 12, 84, 'tiny');
+    nodes.set('journal', journal);
 
     // Market-data routes come from the bus's own subscription table, so the diagram shows
     // what is actually wired rather than what the configuration intended.
@@ -968,23 +1286,48 @@ const pipeline = (() => {
     edges.set('api>broker', edge(edgesGroup, 'api>broker', [api.right, api.cy], [broker.left, broker.cy]));
     edges.set('api>position', edge(edgesGroup, 'api>position', [api.cx, api.bottom], [position.right - 40, position.top]));
     edges.set('bus>recorder', edge(edgesGroup, 'bus>recorder', [X.topic, busBottom], [recorder.cx, recorder.top]));
+    edges.set('bus>journal', edge(edgesGroup, 'bus>journal', [X.topic + 40, busBottom], [journal.cx - 40, journal.top]));
+
+    // Clicking a supervised box opens its fault menu. These are a pointer shortcut: the same
+    // actions are buttons in the Resilience card, so the boxes stay out of the tab order.
+    if (data.view === 'live' && data.resilience.supervised) {
+      for (const node of nodes.values()) {
+        const target = breakTarget(node);
+        if (!target) continue;
+        const hit = s('rect', { class: 'hit', x: node.left, y: node.top, width: node.width, height: node.height, rx: 10 }, nodesGroup);
+        hit.addEventListener('click', (event) => nodeMenu.open(target, event.clientX, event.clientY));
+      }
+    }
 
     layout = { key: topologyKey(data), nodes, edges, width: W, height };
     particles = [];
   }
 
+  function breakTarget(node) {
+    if (node.kind === 'feed') return { component: node.feed };
+    if (node.kind === 'strategy') return { component: node.strategy };
+    if (node.kind === 'execution') return { component: 'order-execution' };
+    if (node.kind === 'position') return { component: 'position-monitor' };
+    return node.kind === 'api' ? { gateways: true } : null;
+  }
+
   const topologyKey = (data) => JSON.stringify([data.feeds.map((f) => [f.name, f.symbols]),
-    data.strategies.map((x) => x.name), data.routes.length > 0]);
+    data.strategies.map((x) => x.name), data.routes.length > 0, data.view, data.gateways.members.length,
+    data.resilience.supervised]);
 
   function update(data) {
     if (!layout || layout.key !== topologyKey(data)) build(data);
     const { nodes, edges } = layout;
     const prices = new Map((data.prices || []).map((price) => [price.symbol, price]));
 
+    const components = new Map(data.resilience.components.map((component) => [component.name, component]));
     for (const feed of data.feeds) {
       const node = nodes.get(`feed:${feed.name}`);
       node.text.rate.textContent = `${fmt.rate(feed.rate)} quotes`;
-      node.text.state.textContent = feed.paused ? '⏸ paused' : feed.finished ? '■ finished' : `● ${feedRateLabel(feed.interval_us)} rounds/s`;
+      node.text.state.textContent = data.view === 'replay' ? (feed.paused ? '⏸ paused' : feed.finished ? '■ replayed' : '⏵ replaying')
+        : feed.paused ? '⏸ paused' : feed.finished ? '■ finished' : `● ${feedRateLabel(feed.interval_us)} rounds/s`;
+      node.text.state.style.fill = '';
+      overlayHealth(node, components.get(feed.name), 'state');
       const perTopic = feed.paused ? 0 : feed.rate / Math.max(1, feed.symbols.length);
       for (const symbol of feed.symbols) {
         const topic = nodes.get(`topic:${symbol}`);
@@ -1000,20 +1343,26 @@ const pipeline = (() => {
       const node = nodes.get(`strategy:${strategy.name}`);
       const status = mailboxStatus(strategy);
       node.text.mailbox.textContent = `MAILBOX ${fmt.count(strategy.depth)} / ${fmt.count(strategy.capacity)} · drop oldest`;
-      setMeter(node, 'mailbox', strategy.depth / strategy.capacity, status);
+      setMeter(node, 'mailbox', strategy.depth / Math.max(1, strategy.capacity), status);
       node.text.flow.textContent = `${fmt.rate(strategy.rate)} in · busy ${fmt.pct(strategy.utilization)}`;
       node.text.signals.textContent = `${fmt.count(strategy.signals)} signals · ${fmt.count(strategy.evicted)} shed`;
       node.text.status.textContent = status === 'critical' ? `✕ shedding ${fmt.rate(strategy.drop_rate)} stale quotes`
         : status === 'warning' ? '⚠︎ mailbox filling' : strategy.work_us ? `slowed ${fmt.micros(strategy.work_us)}` : '';
       node.text.status.style.fill = status === 'normal' ? '' : STATUS[status].color;
+      overlayHealth(node, components.get(strategy.name), 'status');
     }
 
     const execution = nodes.get('execution');
     const exec = data.execution;
     execution.text.mailbox.textContent = `MAILBOX ${fmt.count(exec.depth)} / ${fmt.count(exec.capacity)} · reject new`;
-    setMeter(execution, 'mailbox', exec.depth / exec.capacity, mailboxStatus(exec));
+    setMeter(execution, 'mailbox', exec.depth / Math.max(1, exec.capacity), mailboxStatus(exec));
     execution.text.flow.textContent = `${fmt.count(exec.processed)} signals · busy ${fmt.pct(exec.utilization)}`;
     execution.text.orders.textContent = `${fmt.count(exec.submitted)} orders · ${fmt.count(exec.rejected_submissions)} refused`;
+    const reconciled = exec.recovery;
+    execution.text.status.textContent = reconciled.examined
+      ? `reconciled ${reconciled.examined}: ${reconciled.resubmitted} resent, ${reconciled.in_flight + reconciled.completed} already known` : '';
+    execution.text.status.style.fill = '';
+    overlayHealth(execution, components.get('order-execution'), 'status');
 
     const api = nodes.get('api');
     const gateway = data.api;
@@ -1027,6 +1376,15 @@ const pipeline = (() => {
     api.text.status.textContent = gateway.paused_ms > 0 ? `⚠︎ HTTP 429: paused ${gateway.paused_ms} ms`
       : gateway.pending > 0 && windowFraction >= 1 ? 'rate limit reached: orders wait' : `${fmt.count(gateway.rate_limited)} × 429 seen`;
     api.text.status.style.fill = gateway.paused_ms > 0 ? 'var(--warning)' : '';
+    const members = data.gateways.members;
+    ['gw1', 'gw2'].forEach((key, index) => {
+      const member = members[index];
+      const style = BREAKER_STYLE[member?.state] ?? BREAKER_STYLE.closed;
+      api.text[key].textContent = !member ? (members.length > 2 && index === 1 ? `+${members.length - 2} more` : '')
+        : `${member.name} ${style.glyph} ${member.down ? 'down' : member.state}${member.preferred ? ' ★' : ''}`;
+      api.text[key].style.fill = member && (member.state !== 'closed' || member.down) ? style.color : '';
+    });
+    api.rect.classList.toggle('fault', members.length > 0 && members.every((member) => member.state !== 'closed'));
 
     const broker = nodes.get('broker');
     broker.text.latency.textContent = `mock · ${gateway.mock_latency_ms} ms`;
@@ -1035,16 +1393,43 @@ const pipeline = (() => {
     const position = nodes.get('position');
     const monitor = data.position_monitor;
     position.text.mailbox.textContent = `MAILBOX ${fmt.count(monitor.depth)} / ${fmt.count(monitor.capacity)}`;
-    setMeter(position, 'mailbox', monitor.depth / monitor.capacity, mailboxStatus(monitor));
+    setMeter(position, 'mailbox', monitor.depth / Math.max(1, monitor.capacity), mailboxStatus(monitor));
     position.text.fills.textContent = `${fmt.count(monitor.fills)} fills · ${fmt.count(monitor.rejections)} rejected`;
+    position.text.status.textContent = monitor.duplicates ? `${fmt.count(monitor.duplicates)} duplicate fills ignored` : '';
+    position.text.status.style.fill = '';
+    overlayHealth(position, components.get('position-monitor'), 'status');
 
     const recorder = nodes.get('recorder');
     if (data.recorder) {
       const tap = data.recorder;
       recorder.text.mailbox.textContent = `MAILBOX ${fmt.count(tap.depth)} / ${fmt.count(tap.capacity)} · every event`;
-      setMeter(recorder, 'mailbox', tap.depth / tap.capacity, mailboxStatus(tap));
+      setMeter(recorder, 'mailbox', tap.depth / Math.max(1, tap.capacity), mailboxStatus(tap));
       recorder.text.flow.textContent = `${fmt.rate(tap.rate)} · ${fmt.count(tap.evicted)} shed`;
       edges.get('bus>recorder').rate = tap.rate;
+    }
+    const journalNode = nodes.get('journal');
+    if (data.journal) {
+      const tap = data.journal;
+      const fill = tap.tap_depth / Math.max(1, tap.tap_capacity);
+      journalNode.text.mailbox.textContent = `TAP QUEUE ${fmt.count(tap.tap_depth)} / ${fmt.count(tap.tap_capacity)} · reject new`;
+      setMeter(journalNode, 'mailbox', fill, tap.tap_rejected > 0 || fill >= 0.9 ? 'critical' : fill >= 0.5 ? 'warning' : 'normal');
+      journalNode.text.flow.textContent = `${fmt.rate(tap.rate)} · ${fmtBytes(tap.bytes)}`;
+      journalNode.text.status.textContent = tap.gaps ? `✕ ${fmt.count(tap.gap_events)} events lost (gaps marked)` : `${tap.segments} segment${tap.segments === 1 ? '' : 's'} · ${fmt.count(tap.fsyncs)} syncs`;
+      journalNode.text.status.style.fill = tap.gaps ? 'var(--critical)' : '';
+      edges.get('bus>journal').rate = tap.rate;
+    } else if (data.replay) {
+      const r = data.replay;
+      journalNode.text.mailbox.textContent = `RECORD ${fmt.count(r.current)} / ${fmt.count(r.last)}`;
+      setMeter(journalNode, 'mailbox', r.progress, 'normal');
+      journalNode.text.flow.textContent = `${fmt.count(r.published)} published`;
+      journalNode.text.status.textContent = `${r.state} · ${r.pacing === 'lockstep' ? 'lockstep' : `${r.speed}×`}`;
+      journalNode.text.status.style.fill = '';
+      edges.get('bus>journal').rate = 0;
+    } else {
+      journalNode.text.mailbox.textContent = 'no journal';
+      setMeter(journalNode, 'mailbox', 0, 'normal');
+      journalNode.text.flow.textContent = '';
+      journalNode.text.status.textContent = '';
     }
     if (!data.running) for (const e of edges.values()) e.rate = 0;
   }
@@ -1064,6 +1449,7 @@ const pipeline = (() => {
     tape.forEach((entry, index) => {
       if (state.seenTape.has(keys[index])) return;
       state.seenTape.add(keys[index]);
+      if (entry.kind === 'supervision') return;
       const color = colorValue(entry.strategy);
       const route = entry.kind === 'signal' ? [[`${entry.strategy}>execution`, 1], ['execution>api', 1]]
         : entry.kind === 'fill' ? [['api>broker', 1], ['api>broker', -1], ['api>position', 1]]
@@ -1214,8 +1600,9 @@ function niceTicks(low, high, count) {
   return Array.from({ length: count }, (_, index) => low + step * index);
 }
 
-function signalsFor(data, symbol, since) {
-  return (data.tape || []).filter((entry) => entry.kind === 'signal' && entry.symbol === symbol && entry.t >= since);
+// A replay moved back still has later entries on its tape, hence the upper bound.
+function signalsFor(data, symbol, since, until = timelineNow(data)) {
+  return (data.tape || []).filter((entry) => entry.kind === 'signal' && entry.symbol === symbol && entry.t >= since && entry.t <= until);
 }
 
 function renderPrices(data) {
@@ -1246,10 +1633,12 @@ function drawPriceChart(chart, item, data) {
   const bottom = CHART_HEIGHT - 20;
   const left = 2;
   const right = width - 52;
-  const tMax = data.uptime_s;
+  // Live this is the last 20 s; in a replay, the 20 s of the recording up to the replay's
+  // position, which a seek can move back, so points are bounded and put in time order.
+  const tMax = timelineNow(data);
   const tMin = tMax - WINDOW_S;
-  const points = item.t.map((t, index) => [t, item.p[index]]).filter(([t]) => t >= tMin);
-  const signals = signalsFor(data, item.symbol, tMin);
+  const points = item.t.map((t, index) => [t, item.p[index]]).filter(([t]) => t >= tMin && t <= tMax).sort((a, b) => a[0] - b[0]);
+  const signals = signalsFor(data, item.symbol, tMin, tMax);
   chart.last.textContent = fmt.price(item.last);
   const feedRate = state.latest.feeds.find((feed) => feed.symbols.includes(item.symbol));
   chart.rate.textContent = feedRate ? `${fmt.rate(feedRate.rate / feedRate.symbols.length)} quotes` : '';
@@ -1279,7 +1668,7 @@ function drawPriceChart(chart, item, data) {
   s('line', { class: 'baseline', x1: left, x2: right, y1: bottom, y2: bottom }, svg);
   for (const ago of [20, 15, 10, 5, 0]) {
     s('text', { x: x(tMax - ago), y: CHART_HEIGHT - 5, 'text-anchor': ago === 20 ? 'start' : ago === 0 ? 'end' : 'middle',
-      text: ago === 0 ? 'now' : `−${ago}s` }, svg);
+      text: ago === 0 ? (data.view === 'replay' ? fmt.uptime(tMax) : 'now') : `−${ago}s` }, svg);
   }
   s('path', { class: 'price-line', d: points.map(([t, price], index) => `${index ? 'L' : 'M'}${x(t).toFixed(1)},${y(price).toFixed(1)}`).join('') }, svg);
   for (const signal of signals) {
@@ -1314,7 +1703,7 @@ function hover(chart) {
     s('circle', { cx: view.x(signal.t), cy: view.y(signal.price), r: 9, fill: 'none', style: 'stroke:var(--ink-2)', 'stroke-width': 1 }, layer);
     showTooltip(chart.pointer[0], chart.pointer[1], [signalRows(signal),
       tipRow(fmt.latency(signal.latency_ms * 1000), 'tick → signal'),
-      tipRow(`${(view.tMax - signal.t).toFixed(1)} s ago`, chart.symbol)]);
+      tipRow(when(state.latest, signal.t), chart.symbol)]);
     return;
   }
   const clampedX = clamp(px, view.left, view.right);
@@ -1323,15 +1712,16 @@ function hover(chart) {
   const cx = view.x(nearest[0]);
   s('line', { class: 'crosshair', x1: cx, x2: cx, y1: view.top, y2: view.bottom }, layer);
   s('circle', { cx, cy: view.y(nearest[1]), r: 4, style: 'fill:var(--ink-2);stroke:var(--surface)', 'stroke-width': 2 }, layer);
-  const rows = [tipRow(fmt.price(nearest[1]), `${chart.symbol} · ${(view.tMax - nearest[0]).toFixed(1)} s ago`)];
+  const rows = [tipRow(fmt.price(nearest[1]), `${chart.symbol} · ${when(state.latest, nearest[0])}`)];
   for (const signal of view.signals) if (Math.abs(signal.t - nearest[0]) <= 0.25) rows.push(signalRows(signal));
   showTooltip(chart.pointer[0], chart.pointer[1], rows);
 }
 
 function renderPricesTable(data) {
   const rows = (data.prices || []).map((item) => {
-    const since = data.uptime_s - WINDOW_S;
-    const recent = item.p.filter((_, index) => item.t[index] >= since);
+    const now = timelineNow(data);
+    const since = now - WINDOW_S;
+    const recent = item.p.filter((_, index) => item.t[index] >= since && item.t[index] <= now);
     return [item.symbol, fmt.price(item.last), fmt.price(Math.min(...recent)), fmt.price(Math.max(...recent)),
       fmt.count(item.updates), String(signalsFor(data, item.symbol, since).length)];
   });
@@ -1460,6 +1850,7 @@ const TAPE_KIND = {
   signal: { icon: '◆', color: 'var(--ink-2)', label: 'signal' },
   fill: { icon: '●', color: 'var(--good)', label: 'fill' },
   rejection: { icon: '✕', color: 'var(--critical)', label: 'rejected' },
+  supervision: { icon: '↻', color: 'var(--accent)', label: 'supervisor' },
 };
 
 function strategyCell(name) {
@@ -1467,7 +1858,9 @@ function strategyCell(name) {
 }
 
 function renderTape(data) {
-  const entries = (data.tape || []).slice(-16).reverse();
+  const replay = data.view === 'replay';
+  const now = timelineNow(data);
+  const entries = (data.tape || []).filter((entry) => entry.t <= now).slice(-16).reverse();
   if (!entries.length) {
     $('tape').replaceChildren(h('p', { class: 'muted', text: 'No signals yet. EMA strategies warm up over their first 600 quotes.' }));
     return;
@@ -1476,18 +1869,18 @@ function renderTape(data) {
   for (const entry of entries) {
     const kind = TAPE_KIND[entry.kind];
     body.append(h('tr', {},
-      h('td', { class: 'r muted', text: `${Math.max(0, data.uptime_s - entry.t).toFixed(1)} s` }),
+      h('td', { class: 'r muted', text: replay ? fmt.uptime(entry.t) : `${Math.max(0, now - entry.t).toFixed(1)} s` }),
       h('td', {}, h('span', { class: 'status-icon', style: `color:${kind.color}`, text: kind.icon }), document.createTextNode(` ${kind.label}`)),
       strategyCell(entry.strategy),
-      h('td', { text: entry.symbol }),
-      h('td', { text: `${entry.side === 'BUY' ? '▲' : '▼'} ${entry.side}` }),
-      h('td', { class: 'r', text: fmt.count(entry.qty) }),
+      h('td', { text: entry.symbol || '—' }),
+      h('td', { text: entry.kind === 'supervision' ? '—' : `${entry.side === 'BUY' ? '▲' : '▼'} ${entry.side}` }),
+      h('td', { class: 'r', text: entry.kind === 'supervision' ? '—' : fmt.count(entry.qty) }),
       h('td', { class: 'r', text: entry.price ? fmt.price(entry.price) : '—' }),
-      h('td', { class: 'r', text: fmt.latency(entry.latency_ms * 1000) }),
+      h('td', { class: 'r', text: entry.kind === 'supervision' ? (entry.latency_ms ? `${entry.latency_ms.toFixed(1)} ms` : '—') : fmt.latency(entry.latency_ms * 1000) }),
       h('td', { class: 'muted', text: entry.detail })));
   }
   $('tape').replaceChildren(h('table', {}, h('thead', {}, h('tr', {},
-    ...['Age', 'Event', 'Strategy', 'Symbol', 'Side', 'Qty', 'Price', 'Latency', 'Detail'].map((text, index) =>
+    ...[replay ? 'At' : 'Age', 'Event', 'Strategy', 'Symbol', 'Side', 'Qty', 'Price', 'Latency', 'Detail'].map((text, index) =>
       h('th', { class: [0, 5, 6, 7].includes(index) ? 'r' : '', text })))), body));
 }
 
@@ -1506,6 +1899,855 @@ function renderPositions(data) {
   }
   $('positions').replaceChildren(h('table', {}, h('thead', {}, h('tr', {},
     ...['Strategy', 'Symbol', 'Position', 'Fills', 'P&L'].map((text, index) => h('th', { class: index >= 2 ? 'r' : '', text })))), body));
+}
+
+// ---------------------------------------------------------------- live or replay view
+function renderView(data) {
+  const replay = data.view === 'replay';
+  const pill = $('view-pill');
+  pill.hidden = false;
+  pill.replaceChildren(
+    h('span', { class: 'icon', 'aria-hidden': 'true', style: `color:${replay ? 'var(--accent)' : 'var(--good)'}`, text: replay ? '⏵' : '●' }),
+    h('span', { text: replay ? 'Showing a replay' : 'Showing the live system' }));
+  $('page-title').textContent = replay ? 'Trading pipeline, replay' : 'Trading pipeline, live';
+  document.title = replay ? 'Replay · Pipeline Monitor' : 'Pipeline Monitor';
+  $('live-controls').hidden = replay;
+  $('resilience-sub').textContent = replay ? 'read-only while a replay is shown; incidents are the recording\'s'
+    : data.resilience.supervised ? 'break something and watch the supervisor replace it' : 'supervision is off; start with --supervise';
+  $('pipeline-sub').textContent = replay ? 'the replay drives the same pipeline; moving dots show traffic'
+    : data.resilience.supervised ? 'moving dots show traffic; click a thread or the gateway pool to break it'
+      : 'moving dots show traffic; each mailbox shows its fill';
+  $('prices-sub').textContent = replay ? `the ${WINDOW_S} s of the recording up to the replay's position; markers are this replay's signals`
+    : `last ${WINDOW_S} s; markers are the signals each strategy published`;
+
+  const banner = $('replay-banner');
+  if (!replay || !data.replay) { banner.hidden = true; return; }
+  if (!banner.dataset.built) {
+    banner.dataset.built = '1';
+    const back = h('button', { class: 'ghost', type: 'button', id: 'banner-live', text: 'Back to live' });
+    back.addEventListener('click', () => sendControl('view.show', 'live'));
+    banner.append(h('strong', { text: 'REPLAY' }), h('span', { id: 'banner-text' }), h('span', { class: 'chip', id: 'banner-verdict' }), back);
+  }
+  banner.hidden = false;
+  const r = data.replay;
+  $('banner-text').textContent = `session ${data.session.replace(/^replay-/, '')} · ${MODE_LABEL[r.mode]} · ${r.state} · ${Math.round(r.progress * 100)}%`;
+  paintVerdict($('banner-verdict'), r.verification);
+  $('banner-live').hidden = !data.live_available;
+}
+
+const MODE_LABEL = { rederive: 're-derive', playback: 'playback' };
+
+const VERDICTS = {
+  match: { glyph: '✓', color: 'var(--good)', label: 'matches the recording' },
+  explained: { glyph: '≈', color: 'var(--good)', label: 'differs only where a restart skipped signals' },
+  diverged: { glyph: '✕', color: 'var(--critical)', label: 'diverges from the recording' },
+  running: { glyph: '…', color: 'var(--accent)', label: 'comparing' },
+  'not-comparable': { glyph: '–', color: 'var(--muted)', label: 'not comparable' },
+};
+
+const sentence = (text) => (/[.!?]$/.test(text) ? text : `${text}.`);
+
+function paintVerdict(node, verification) {
+  if (!verification || !verification.enabled) { node.hidden = true; return; }
+  const style = VERDICTS[verification.verdict] ?? VERDICTS.running;
+  node.hidden = false;
+  node.replaceChildren(h('span', { 'aria-hidden': 'true', style: `color:${style.color}`, text: style.glyph }), h('span', { text: style.label }));
+}
+
+// ---------------------------------------------------------------- resilience
+const FAULT_LABEL = { crash: 'Crash', hang: 'Hang 8 s', poison: 'Poison' };
+const FAULT_HELP = {
+  crash: 'Kill the worker thread. The supervisor sees it die and starts a replacement.',
+  hang: 'Make the handler block, as a deadlock would. Work piles up while nothing completes; the supervisor abandons the stuck thread, fences it and starts a replacement. The old thread wakes up after 8 s and finds it can no longer write.',
+  poison: 'Make every event throw until the worker is replaced.',
+};
+const FAULTS_FOR = { strategy: ['crash', 'hang', 'poison'], execution: ['crash', 'hang', 'poison'],
+  'position-monitor': ['crash', 'hang', 'poison'], feed: ['crash'] };
+const LOG_STYLE = {
+  fault: { glyph: '✕', color: 'var(--critical)', label: 'fault detected' },
+  restarted: { glyph: '↻', color: 'var(--good)', label: 'replaced' },
+  rebuilding: { glyph: '↻', color: 'var(--warning)', label: 'replaced, still rebuilding' },
+  live: { glyph: '●', color: 'var(--good)', label: 'rebuilt and live' },
+  quarantined: { glyph: '⛔', color: 'var(--critical)', label: 'quarantined' },
+  'recovery-failed': { glyph: '✕', color: 'var(--critical)', label: 'recovery failed' },
+};
+
+async function inject(name, kind, button) {
+  button.disabled = true;
+  setTimeout(() => { button.disabled = false; }, 900);
+  await sendControl(`fault.${kind}:${name}`, kind === 'hang' ? 8000 : 1);
+}
+
+function buildComponentRow(component, interactive) {
+  const row = h('div', { class: 'component', 'data-name': component.name });
+  const buttons = h('div', { class: 'fault-buttons' });
+  if (interactive) {
+    for (const kind of FAULTS_FOR[component.kind] ?? []) {
+      const button = h('button', { class: 'ghost', type: 'button', title: FAULT_HELP[kind], text: FAULT_LABEL[kind] });
+      button.addEventListener('click', () => inject(component.name, kind, button));
+      buttons.append(button);
+    }
+  }
+  row.append(
+    h('div', { class: 'who' }, h('strong', { text: component.name }), h('small', { class: 'kind' })),
+    h('div', {}, h('span', { class: 'state' }, h('span', { class: 'glyph', 'aria-hidden': 'true' }), h('span', { class: 'label' })),
+      h('span', { class: 'meta' })),
+    buttons,
+    h('div', { class: 'detail' }));
+  return row;
+}
+
+const KIND_LABEL = { feed: 'feed thread', strategy: 'strategy thread', execution: 'order execution thread',
+  'position-monitor': 'position monitor thread' };
+
+function updateComponentRow(row, component) {
+  const style = STATE_STYLE[component.state] ?? STATE_STYLE.healthy;
+  row.querySelector('.kind').textContent = KIND_LABEL[component.kind] ?? component.kind;
+  const glyph = row.querySelector('.glyph');
+  glyph.textContent = style.glyph;
+  glyph.parentNode.style.color = style.color;
+  row.querySelector('.label').textContent = style.label;
+  row.querySelector('.meta').textContent =
+    `generation ${component.generation} · ${component.restarts} restart${component.restarts === 1 ? '' : 's'}`;
+
+  const down = component.state !== 'healthy' && component.state !== 'degraded';
+  const recovered = component.state === 'healthy' && component.restarts > 0 && recentlyRecovered(component.name);
+  row.classList.toggle('fault', down && component.state !== 'restarting');
+  row.classList.toggle('working', component.state === 'restarting');
+  row.classList.toggle('slow', component.state === 'degraded');
+  row.classList.toggle('recovered', recovered);
+
+  const detail = row.querySelector('.detail');
+  let text;
+  if (down) {
+    text = `${component.last_cause || 'failed'}${component.last_error ? ` (${component.last_error})` : ''}`;
+    if (component.down_for_ms) text += ` — down for ${Math.round(component.down_for_ms)} ms`;
+    if (component.state === 'quarantined') text = `${component.last_cause} — ${component.detail}`;
+  } else if (component.state === 'degraded') {
+    text = component.last_cause;
+  } else if (component.restarts > 0) {
+    text = (component.last_detect_ms > 0 ? `Noticed after ${ms(component.last_detect_ms)}, replaced` : 'Replaced') +
+      ` in ${ms(component.last_recovery_ms)}: ${component.detail}`;
+    if (component.fenced_writes) text += ` · ${fmt.count(component.fenced_writes)} write${component.fenced_writes === 1 ? '' : 's'} by the stale instance blocked`;
+    if (component.dead_letters) text += ` · ${component.dead_letters} poison event${component.dead_letters === 1 ? '' : 's'} dead-lettered`;
+  } else {
+    text = 'No faults so far.';
+  }
+  detail.textContent = text;
+  detail.style.color = down && component.state !== 'restarting' ? style.color : '';
+}
+
+function renderResilience(data) {
+  const resilience = data.resilience;
+  const interactive = data.view === 'live' && resilience.supervised;
+  $('resilience-summary').textContent = resilience.supervised
+    ? `${resilience.faults} fault${resilience.faults === 1 ? '' : 's'} · ${resilience.restarts} restart${resilience.restarts === 1 ? '' : 's'}` +
+      (resilience.zombies ? ` · ${resilience.zombies} stuck thread${resilience.zombies === 1 ? '' : 's'}` : '')
+    : 'not supervised';
+
+  const root = $('components');
+  const key = resilience.components.map((component) => `${component.name}:${component.kind}`).join('|') + interactive;
+  if (root.dataset.key !== key) {
+    root.dataset.key = key;
+    root.replaceChildren(...resilience.components.map((component) => buildComponentRow(component, interactive)));
+  }
+  for (const component of resilience.components) {
+    updateComponentRow(root.querySelector(`[data-name="${CSS.escape(component.name)}"]`), component);
+  }
+
+  const log = supervisionLog(data);
+  const incidents = buildIncidents(log);
+  renderTimeline(data, incidents);
+  renderLastIncident(data, incidents);
+  renderGateways(data, interactive);
+  renderSupervisorLog(data, log);
+}
+
+// ---------------------------------------------------------------- incidents
+// Pairs each fault in the supervisor's log with what became of it. An incident starts when
+// the fault began (detection time minus how long it had been there), is noticed when the
+// supervisor acts, and ends when the replacement is live.
+function buildIncidents(log) {
+  const open = new Map();
+  const incidents = [];
+  const close = (name, t, outcome, entry = null) => {
+    const incident = open.get(name);
+    if (!incident) return null;
+    open.delete(name);
+    incident.end = t;
+    incident.outcome = outcome;
+    if (entry) {
+      incident.recovery_ms = entry.recovery_ms;
+      incident.detail = entry.detail;
+    }
+    return incident;
+  };
+  for (const entry of log) {
+    const name = entry.component;
+    if (entry.action === 'fault' || entry.action === 'quarantined') {
+      close(name, entry.t, 'failed');
+      const incident = { component: name, cause: entry.action === 'fault' ? entry.detail : entry.detail.split(' — ')[0],
+        start: entry.t - (entry.detect_ms ?? 0) / 1000, detected: entry.t, detect_ms: entry.detect_ms, end: null,
+        recovery_ms: null, outcome: entry.action === 'fault' ? 'recovering' : 'quarantined', detail: '' };
+      incidents.push(incident);
+      if (entry.action === 'fault') open.set(name, incident);
+      else incident.detail = entry.detail.split(' — ').slice(1).join(' — ');
+    } else if (entry.action === 'restarted') {
+      close(name, entry.t, 'restarted', entry);
+    } else if (entry.action === 'rebuilding') {
+      const incident = open.get(name);
+      if (incident) Object.assign(incident, { outcome: 'rebuilding', detail: entry.detail });
+    } else if (entry.action === 'live') {
+      const incident = close(name, entry.t, 'restarted');
+      if (incident) incident.recovery_ms = (entry.t - incident.detected) * 1000;
+    } else if (entry.action === 'recovery-failed') {
+      close(name, entry.t, 'failed', entry);
+    }
+  }
+  return incidents;
+}
+
+const SPAN_STYLE = {
+  down: { color: 'var(--critical)', label: 'down' },
+  recovering: { color: 'var(--warning)', label: 'being replaced, or on probation' },
+  slow: { color: 'var(--serious)', label: 'slow handler' },
+  back: { color: 'var(--good)', label: 'back in service' },
+};
+const GATEWAY_SPAN = {
+  down: ['down', 'connection down'], ejected: ['down', 'ejected from rotation'], probation: ['recovering', 'on probation'],
+};
+const OUTCOME = {
+  restarted: { glyph: '↻', color: 'var(--good)', text: (downMs) => `back in ${fmt.latency(downMs * 1000)}` },
+  rebuilding: { glyph: '↻', color: 'var(--warning)', text: () => 'replaced, still rebuilding its state' },
+  recovering: { glyph: '↻', color: 'var(--warning)', text: () => 'being replaced' },
+  failed: { glyph: '✕', color: 'var(--critical)', text: () => 'recovery failed' },
+  quarantined: { glyph: '⛔', color: 'var(--critical)', text: () => 'quarantined: left down' },
+};
+const ms = (value) => (value == null ? '—' : fmt.latency(value * 1000));
+
+const TIMELINE_S = 60;
+const LANE_H = 18;
+const LANE_LABEL_W = 124;
+const timeline = { marks: [], pointer: null };
+
+function timelineLanes(data, incidents) {
+  const lanes = data.resilience.components.map((component) => ({ id: component.name, label: component.name }));
+  const known = new Set(lanes.map((lane) => lane.id));
+  for (const incident of incidents) {
+    if (known.has(incident.component)) continue;
+    known.add(incident.component);
+    lanes.push({ id: incident.component, label: incident.component });
+  }
+  if (data.view === 'live' && data.gateways.members.length > 1) {
+    for (const member of data.gateways.members) lanes.push({ id: `gateway:${member.name}`, label: member.name });
+  }
+  return lanes;
+}
+
+function renderTimeline(data, incidents) {
+  const root = $('timeline');
+  const now = timelineNow(data);
+  const lanes = timelineLanes(data, incidents);
+  timeline.marks = [];
+  if (!lanes.length) {
+    root.replaceChildren(h('p', { class: 'muted', text: 'Nothing is supervised.' }));
+    $('timeline-legend').replaceChildren();
+    return;
+  }
+  let svg = root.querySelector('svg');
+  if (!svg) {
+    svg = s('svg', { role: 'img' });
+    root.replaceChildren(svg);
+    svg.addEventListener('pointermove', (event) => { timeline.pointer = [event.clientX, event.clientY]; timelineHover(svg); });
+    svg.addEventListener('pointerleave', () => { timeline.pointer = null; hideTooltip(); });
+  }
+  const width = svg.clientWidth || 600;
+  const bottom = lanes.length * LANE_H;
+  const height = bottom + 22;
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.setAttribute('height', height);
+  svg.setAttribute('aria-label', `Incidents over the last ${TIMELINE_S} s, one lane per thread and gateway. ` +
+    `${incidents.length} supervisor incident${incidents.length === 1 ? '' : 's'} in the log.`);
+  svg.replaceChildren();
+
+  const left = LANE_LABEL_W;
+  const right = width - 4;
+  const from = now - TIMELINE_S;
+  const x = (t) => left + ((t - from) / TIMELINE_S) * (right - left);
+  const laneY = new Map(lanes.map((lane, index) => [lane.id, index * LANE_H + LANE_H / 2]));
+  for (const lane of lanes) {
+    const y = laneY.get(lane.id);
+    s('text', { class: 'lane-label', x: 0, y: y + 4, text: lane.label }, svg);
+    s('line', { class: 'gridline', x1: left, x2: right, y1: y, y2: y }, svg);
+  }
+  s('line', { class: 'baseline', x1: left, x2: right, y1: bottom + 2, y2: bottom + 2 }, svg);
+  for (const ago of [60, 45, 30, 15, 0]) {
+    s('text', { x: x(now - ago), y: bottom + 16, 'text-anchor': ago === TIMELINE_S ? 'start' : ago === 0 ? 'end' : 'middle',
+      text: ago === 0 ? (data.view === 'replay' ? fmt.uptime(now) : 'now') : `−${ago}s` }, svg);
+  }
+
+  // Recoveries take milliseconds and the axis spans a minute, so every phase is drawn at
+  // least 3 px wide, each after the one before it; the tooltip and the summary give the
+  // real durations.
+  const draw = (laneId, phases, backAt, rows) => {
+    const y = laneY.get(laneId);
+    let cursor = -Infinity;
+    let first = null;
+    for (const [t0, t1, style] of phases) {
+      const x0 = Math.max(left, x(t0), cursor);
+      const x1 = Math.min(right, Math.max(x(t1), x0 + 3));
+      if (x1 <= left) continue;
+      s('rect', { x: x0, y: y - 5, width: Math.max(0, x1 - x0), height: 10, rx: 2, style: `fill:${SPAN_STYLE[style].color}` }, svg);
+      first ??= x0;
+      cursor = x1;
+    }
+    if (backAt != null && cursor > left) {
+      cursor = Math.min(right - 3, cursor + 4);
+      s('circle', { cx: cursor, cy: y, r: 3, style: `fill:${SPAN_STYLE.back.color};stroke:var(--surface)`, 'stroke-width': 1 }, svg);
+    }
+    if (first != null) timeline.marks.push({ y, x0: first, x1: cursor, rows });
+  };
+
+  for (const incident of incidents) {
+    if (!laneY.has(incident.component)) continue;
+    const end = incident.end ?? now;
+    if (end < from) continue;
+    const failed = incident.outcome === 'failed' || incident.outcome === 'quarantined';
+    draw(incident.component, [[incident.start, incident.detected, 'down'], [incident.detected, end, failed ? 'down' : 'recovering']],
+      incident.outcome === 'restarted' ? incident.end : null, () => incidentRows(data, incident));
+  }
+  if (data.view === 'live') {
+    for (const span of outages.spans) {
+      if (!laneY.has(span.lane)) continue;
+      const end = span.end ?? now;
+      if (end < from) continue;
+      const [style, label] = span.kind === 'slow' ? ['slow', 'handler running long'] : GATEWAY_SPAN[span.kind];
+      draw(span.lane, [[span.start, end, style]], null, () => [
+        tipRow(span.lane.replace(/^gateway:/, ''), label),
+        tipRow(span.end == null ? `${ms((now - span.start) * 1000)} so far` : ms((span.end - span.start) * 1000), when(data, span.start)),
+      ]);
+    }
+  }
+  if (timeline.pointer) timelineHover(svg);
+
+  const legend = $('timeline-legend');
+  if (!legend.children.length) {
+    legend.append(...Object.values(SPAN_STYLE).map((style, index, all) => {
+      const key = s('svg', { width: 12, height: 10, 'aria-hidden': 'true' });
+      if (index === all.length - 1) s('circle', { cx: 6, cy: 5, r: 3.5, style: `fill:${style.color}` }, key);
+      else s('rect', { x: 1, y: 1, width: 10, height: 8, rx: 2, style: `fill:${style.color}` }, key);
+      return h('span', { class: 'key' }, key, h('span', { text: style.label }));
+    }));
+  }
+}
+
+function incidentRows(data, incident) {
+  const end = incident.end ?? timelineNow(data);
+  const outcome = OUTCOME[incident.outcome] ?? OUTCOME.recovering;
+  const rows = [tipRow(incident.component, incident.cause || 'fault')];
+  if (incident.detect_ms > 0) rows.push(tipRow(ms(incident.detect_ms), 'until noticed', palette.critical));
+  if (incident.outcome === 'restarted' && incident.recovery_ms != null) {
+    rows.push(tipRow(ms(incident.recovery_ms), 'to replace and rebuild', palette.warning));
+  }
+  rows.push(tipRow(outcome.text((end - incident.start) * 1000), when(data, incident.detected)));
+  return rows;
+}
+
+function timelineHover(svg) {
+  if (!timeline.pointer) return;
+  const rect = svg.getBoundingClientRect();
+  const px = timeline.pointer[0] - rect.left;
+  const py = timeline.pointer[1] - rect.top;
+  const centre = (mark) => Math.abs((mark.x0 + mark.x1) / 2 - px);
+  const mark = timeline.marks
+    .filter((candidate) => Math.abs(candidate.y - py) <= LANE_H / 2 && px >= candidate.x0 - 6 && px <= candidate.x1 + 6)
+    .sort((a, b) => centre(a) - centre(b))[0];
+  if (mark) showTooltip(timeline.pointer[0], timeline.pointer[1], mark.rows());
+  else hideTooltip();
+}
+
+// Bars in proportion to how long each phase took, then each phase's duration in words.
+function phaseBar(phases, total) {
+  const sumMs = sum(phases, ([, value]) => value) || 1;
+  return [
+    h('div', { class: 'phase-bar', role: 'img', 'aria-label': phases.map(([, value, label]) => `${ms(value)} ${label}`).join(', ') },
+      ...phases.map(([style, value]) => h('span', { style: `flex:${Math.max(value / sumMs, 0.001)} 1 0;background:${SPAN_STYLE[style].color}` }))),
+    h('div', { class: 'phase-legend' },
+      ...phases.map(([style, value, label]) => h('span', { class: 'key' },
+        h('span', { class: 'dot', style: `background:${SPAN_STYLE[style].color}` }), h('span', { text: `${ms(value)} ${label}` }))),
+      total ? h('span', { class: 'muted', text: total }) : null),
+  ];
+}
+
+function renderLastIncident(data, incidents) {
+  const root = $('last-incident');
+  const now = timelineNow(data);
+  const incident = incidents[incidents.length - 1];
+  const gatewaySpans = data.view === 'live' ? outages.spans.filter((span) => span.kind !== 'slow') : [];
+  const span = gatewaySpans[gatewaySpans.length - 1];
+
+  if (span && (!incident || span.start > incident.detected)) {
+    // One outage can pass through several states (down, ejected, on probation): gather the
+    // unbroken run of them on this gateway.
+    const chain = [span];
+    for (let index = gatewaySpans.length - 2; index >= 0; --index) {
+      const earlier = gatewaySpans[index];
+      if (earlier.lane !== span.lane) continue;
+      if (earlier.end !== chain[0].start) break;
+      chain.unshift(earlier);
+    }
+    const name = span.lane.replace(/^gateway:/, '');
+    const start = chain[0].start;
+    const over = span.end != null;
+    const elapsed = ((span.end ?? now) - start) * 1000;
+    root.replaceChildren(
+      h('div', { class: 'headline' },
+        h('span', { 'aria-hidden': 'true', style: `color:${over ? 'var(--good)' : 'var(--critical)'}`, text: over ? '↻' : '✕' }),
+        h('strong', { text: name }), h('span', { text: GATEWAY_SPAN[chain[0].kind][1] }),
+        h('span', { class: 'chip', text: over ? `back in rotation after ${ms(elapsed)}` : `out of rotation for ${ms(elapsed)}` }),
+        h('span', { class: 'muted', text: when(data, start) })),
+      ...phaseBar(chain.map((link) => [GATEWAY_SPAN[link.kind][0], ((link.end ?? now) - link.start) * 1000, GATEWAY_SPAN[link.kind][1]])),
+      h('div', { text: `${fmt.count(data.gateways.reroutes)} request${data.gateways.reroutes === 1 ? '' : 's'} re-routed to another gateway so far, ` +
+        'each under its order id, which the broker uses to execute it only once.' }));
+    return;
+  }
+
+  if (!incident) {
+    root.replaceChildren(h('div', { class: 'muted', text: data.view === 'replay'
+      ? noRecordedIncidents(data)
+      : data.resilience.supervised ? 'No incidents yet. Click a thread or the gateway pool in the pipeline, or use the buttons below, to break something.'
+        : 'Supervision is off; start with --supervise.' }));
+    return;
+  }
+
+  const outcome = OUTCOME[incident.outcome] ?? OUTCOME.recovering;
+  const end = incident.end ?? now;
+  const downMs = (end - incident.start) * 1000;
+  // A poisoned worker is caught by counting failures, not by waiting, so it has no time to
+  // notice; neither does an event from a recording, which does not carry one.
+  const noticed = incident.detect_ms > 0;
+  const phases = [];
+  if (noticed) phases.push(['down', incident.detect_ms, 'until the supervisor noticed']);
+  if (incident.outcome === 'restarted') phases.push(['recovering', incident.recovery_ms ?? (end - incident.detected) * 1000, 'to replace it and rebuild its state']);
+  else if (incident.outcome === 'quarantined') phases.push(['down', (end - incident.detected) * 1000, 'left down so far']);
+  else phases.push([incident.outcome === 'failed' ? 'down' : 'recovering', (end - incident.detected) * 1000,
+    incident.outcome === 'failed' ? 'before the replacement failed' : 'replacing it so far']);
+
+  const component = data.resilience.components.find((item) => item.name === incident.component);
+  const notes = [];
+  if (incident.detail) notes.push(sentence(incident.detail.charAt(0).toUpperCase() + incident.detail.slice(1)));
+  if (component?.fenced_writes) {
+    notes.push(`The abandoned thread has since tried ${fmt.count(component.fenced_writes)} write${component.fenced_writes === 1 ? '' : 's'}; every one was blocked.`);
+  }
+  if (component?.dead_letters) notes.push(`${component.dead_letters} poison event${component.dead_letters === 1 ? ' was' : 's were'} dead-lettered.`);
+  root.replaceChildren(
+    h('div', { class: 'headline' },
+      h('span', { 'aria-hidden': 'true', style: `color:${outcome.color}`, text: outcome.glyph }),
+      h('strong', { text: incident.component }), h('span', { text: incident.cause || 'fault' }),
+      h('span', { class: 'chip', style: `color:${outcome.color}`, text: outcome.text(downMs) }),
+      h('span', { class: 'muted', text: when(data, incident.detected) })),
+    ...phaseBar(phases, incident.outcome === 'restarted' && noticed ? `${ms(downMs)} down in all` : ''),
+    notes.length ? h('div', { text: notes.join(' ') }) : null);
+}
+
+function renderGateways(data, interactive) {
+  const members = data.gateways.members;
+  const root = $('gateway-list');
+  const key = members.map((member) => member.name).join('|') + interactive;
+  if (root.dataset.key !== key) {
+    root.dataset.key = key;
+    root.replaceChildren(...members.map((member, index) => {
+      const button = h('button', { class: 'ghost', type: 'button', 'aria-pressed': 'false',
+        title: 'Make this gateway\'s connection fail. Requests move to another gateway with the same idempotency key.' });
+      button.addEventListener('click', () => {
+        const down = button.getAttribute('aria-pressed') !== 'true';
+        button.disabled = true;
+        setTimeout(() => { button.disabled = false; }, 600);
+        sendControl(`fault.gateway:${index}`, down ? 1 : 0);
+      });
+      const buttons = h('div', { class: 'fault-buttons' });
+      if (interactive) buttons.append(button);
+      return h('div', { class: 'component', 'data-gateway': member.name },
+        h('div', { class: 'who' }, h('strong', { text: member.name }), h('small', { class: 'kind' })),
+        h('div', {}, h('span', { class: 'state' }, h('span', { class: 'glyph', 'aria-hidden': 'true' }), h('span', { class: 'label' })),
+          h('span', { class: 'meta' })),
+        buttons, h('div', { class: 'detail' }));
+    }));
+  }
+  for (const member of members) {
+    const row = root.querySelector(`[data-gateway="${CSS.escape(member.name)}"]`);
+    const style = BREAKER_STYLE[member.state] ?? BREAKER_STYLE.closed;
+    row.querySelector('.kind').textContent = member.preferred ? 'takes new orders' : member.state === 'closed' ? 'standing by' : 'out of rotation';
+    const glyph = row.querySelector('.glyph');
+    glyph.textContent = style.glyph;
+    glyph.parentNode.style.color = style.color;
+    row.querySelector('.label').textContent = `circuit ${member.state}${member.down ? ' · connection down' : ''}`;
+    row.querySelector('.meta').textContent =
+      `${fmt.count(member.submitted)} sent · ${fmt.count(member.failed)} failed · ${member.ejections} ejection${member.ejections === 1 ? '' : 's'}`;
+    row.classList.toggle('fault', member.state === 'open');
+    row.classList.toggle('slow', member.state === 'half-open');
+    const detail = row.querySelector('.detail');
+    detail.textContent = member.state === 'open' ? `ejected: back on probation in ${member.reopens_in_ms} ms`
+      : member.state === 'half-open' ? 'on probation: one probe request at a time until it succeeds twice'
+      : member.consecutive_failures ? `${member.consecutive_failures} consecutive failure${member.consecutive_failures === 1 ? '' : 's'}`
+      : member.pending || member.active ? `${member.active} in flight · ${member.pending} waiting` : '';
+    const button = row.querySelector('button');
+    if (button) {
+      button.setAttribute('aria-pressed', String(member.down));
+      button.textContent = member.down ? 'Bring up' : 'Take down';
+    }
+  }
+  const pool = data.gateways;
+  $('gateway-note').textContent = `Orders use the first healthy gateway (one credential's limit at a time). ` +
+    `${pool.reroutes} request${pool.reroutes === 1 ? '' : 's'} re-routed after a hard failure; HTTP 429 slows a gateway down but never fails it over. ` +
+    `A failed gateway is never the last one ejected.`;
+}
+
+// A fault row says how long the fault had been there when it was noticed; a replacement row
+// how long replacing it took.
+const NOTICED_ACTIONS = new Set(['fault', 'quarantined']);
+const TOOK_ACTIONS = new Set(['restarted', 'rebuilding', 'recovery-failed']);
+
+function renderSupervisorLog(data, log) {
+  const replay = data.view === 'replay';
+  const entries = log.slice(-12).reverse();
+  const root = $('supervisor-log');
+  if (!entries.length) {
+    root.replaceChildren(h('p', { class: 'muted', text: replay
+      ? noRecordedIncidents(data)
+      : data.resilience.supervised ? 'Nothing yet. Click a thread in the pipeline, or use the buttons in the Resilience card, to crash or hang one.' : 'Supervision is off.' }));
+    return;
+  }
+  const body = h('tbody');
+  for (const entry of entries) {
+    const style = LOG_STYLE[entry.action] ?? LOG_STYLE.fault;
+    const label = entry.action === 'restarted' && entry.generation != null ? `${style.label} (gen ${entry.generation})` : style.label;
+    // The detail is a sentence, so it gets a line of its own under the figures.
+    body.append(h('tr', { class: entry.detail ? 'has-detail' : '' },
+      h('td', { class: 'r muted', text: replay ? fmt.uptime(entry.t) : `${Math.max(0, data.uptime_s - entry.t).toFixed(1)} s ago` }),
+      h('td', {}, h('span', { class: 'log-glyph', style: `color:${style.color}`, 'aria-hidden': 'true', text: style.glyph }),
+        document.createTextNode(` ${entry.component}`)),
+      h('td', { text: label }),
+      h('td', { class: 'r', text: NOTICED_ACTIONS.has(entry.action) ? ms(entry.detect_ms) : '—' }),
+      h('td', { class: 'r', text: TOOK_ACTIONS.has(entry.action) ? ms(entry.recovery_ms) : '—' })));
+    if (entry.detail) body.append(h('tr', { class: 'detail-row' }, h('td'), h('td', { colspan: '4', text: entry.detail })));
+  }
+  root.replaceChildren(h('table', {}, h('thead', {}, h('tr', {},
+    ...[replay ? 'At' : 'When', 'Component', 'Event', 'Noticed after', 'Took'].map((text, index) =>
+      h('th', { class: index === 0 || index === 3 || index === 4 ? 'r' : '', text })))), body));
+}
+
+// A re-derivation publishes only the recorded quotes, so the recording's supervision events
+// never reach its tape; the verifier still knows which components were restarted.
+function noRecordedIncidents(data) {
+  const r = data.replay;
+  if (r?.mode !== 'rederive') return 'The recording has no supervisor events up to this point.';
+  const restarted = r.verification.outages;
+  return 'A re-derivation replays only the recorded quotes, so the recording\'s own incidents are not replayed here.' +
+    (restarted.length ? ` Restarted while it was recorded: ${restarted.join(', ')}.` : '');
+}
+
+// ---------------------------------------------------------------- order integrity
+// The snapshot reads its counters one after another, so a downstream count can briefly run
+// ahead of an upstream one read a moment earlier. A real loss or double count does not go
+// away, so a check fails only after it has been failing for a second.
+const breaches = new Map();  // check id -> uptime when it started failing
+
+function verdict(id, failing, t) {
+  if (!failing) { breaches.delete(id); return 'ok'; }
+  if (!breaches.has(id)) breaches.set(id, t);
+  return t - breaches.get(id) >= 1 ? 'fail' : 'settling';
+}
+
+const CHECK_STYLE = {
+  ok: { glyph: '✓', color: 'var(--good)' },
+  fail: { glyph: '✕', color: 'var(--critical)' },
+  settling: { glyph: '…', color: 'var(--muted)' },
+};
+
+function renderLedger(data) {
+  const root = $('ledger');
+  const monitor = data.position_monitor;
+  if (data.replay && data.replay.mode === 'playback') {
+    root.replaceChildren(h('p', { class: 'note-line', text: 'Playback re-publishes the recorded signals and fills; nothing is ' +
+      `sent, so there is nothing to reconcile. ${fmt.count(monitor.fills)} recorded fills have rebuilt the positions` +
+      (monitor.duplicates ? `, and ${fmt.count(monitor.duplicates)} repeated reports were ignored.` : '.') }));
+    return;
+  }
+  const t = data.uptime_s;
+  const exec = data.execution;
+  const api = data.api;
+  const signals = sum(data.strategies, (strategy) => strategy.signals);
+  const outcomes = monitor.fills + monitor.rejections;
+  const open = signals - outcomes;
+  // Where an open signal can legitimately be: in the execution mailbox, at the gateway, or in
+  // the position monitor's mailbox. Inside a handler it is there for microseconds, which the
+  // one-second rule above absorbs.
+  const queued = exec.depth + api.outstanding + monitor.depth;
+
+  const steps = [
+    ['Signals', signals, `from ${data.strategies.length} strateg${data.strategies.length === 1 ? 'y' : 'ies'}`],
+    ['Orders sent', exec.submitted, exec.rejected_submissions ? `${fmt.count(exec.rejected_submissions)} refused` : 'one per signal'],
+    ['Broker calls', api.mock_calls, `${fmt.count(api.retries)} retries · ${fmt.count(data.gateways.reroutes)} re-routed`],
+    ['Fills', monitor.fills, monitor.duplicates
+      ? `${fmt.count(monitor.duplicates)} repeat${monitor.duplicates === 1 ? '' : 's'} ignored` : 'applied once each'],
+    ['Rejected', monitor.rejections, exec.recovery.expired ? `${fmt.count(exec.recovery.expired)} expired in recovery` : 'outcome, not a loss'],
+    ['Open now', Math.max(0, open), 'queued or in flight'],
+  ];
+
+  const lost = exec.rejected + monitor.rejected;
+  const checks = [
+    { id: 'lost', state: verdict('lost', lost > 0, t), title: 'Nothing dropped on the order path',
+      ok: 'Signals and execution reports go into mailboxes that refuse rather than evict, and none has refused one.',
+      bad: `${fmt.count(exec.rejected)} signals and ${fmt.count(monitor.rejected)} reports were refused by a full mailbox.` },
+    { id: 'twice', state: verdict('twice', open < 0, t), title: 'No signal has two outcomes',
+      ok: `${fmt.count(outcomes)} outcomes for ${fmt.count(signals)} signals` +
+        (monitor.duplicates ? `; the position book ignored ${fmt.count(monitor.duplicates)} repeated report${monitor.duplicates === 1 ? '' : 's'} by order id.` : '.'),
+      bad: `${fmt.count(-open)} more outcomes than signals: something was counted twice.` },
+    { id: 'open', state: verdict('open', open > queued, t), title: 'Every open signal is somewhere',
+      ok: open > 0 ? `${fmt.count(open)} open: ${fmt.count(exec.depth)} waiting for execution, ${fmt.count(api.outstanding)} at the gateway, ` +
+        `${fmt.count(monitor.depth)} reports waiting to be applied.` : 'Nothing open: every signal has its outcome.',
+      bad: `${fmt.count(open - queued)} signals have no outcome and are in no queue.` },
+  ];
+  if (exec.recovery.examined) {
+    const r = exec.recovery;
+    checks.push({ id: 'recovery', state: 'ok', title: 'Execution restarts asked the broker before resending',
+      ok: `${fmt.count(r.examined)} unreported signal${r.examined === 1 ? '' : 's'} checked: ${fmt.count(r.in_flight)} still in flight, ` +
+        `${fmt.count(r.completed)} already done at the broker, ${fmt.count(r.resubmitted)} resent, ${fmt.count(r.expired)} expired.` });
+  }
+  if (data.gateways.reroutes_denied) {
+    checks.push({ id: 'denied', state: 'ok', title: 'Unsafe re-routes refused',
+      ok: `${fmt.count(data.gateways.reroutes_denied)} failed request${data.gateways.reroutes_denied === 1 ? ' was' : 's were'} not moved to another gateway, ` +
+        'because the broker could not have recognised a second copy.' });
+  }
+
+  root.replaceChildren(
+    h('div', { class: 'ledger-flow' }, ...steps.map(([key, value, note]) => h('div', { class: 'ledger-step' },
+      h('span', { class: 'k', text: key }), h('span', { class: 'v', text: fmt.count(value) }), h('small', { text: note })))),
+    h('ul', { class: 'checks' }, ...checks.map((check) => {
+      const style = CHECK_STYLE[check.state];
+      return h('li', {}, h('span', { class: 'glyph', style: `color:${style.color}`, 'aria-hidden': 'true', text: style.glyph }),
+        h('span', { text: check.state === 'settling' ? `${check.title} (checking)` : check.title }),
+        h('small', { text: check.state === 'fail' ? check.bad : check.ok }));
+    })));
+}
+
+// ---------------------------------------------------------------- break-a-component menu
+const NODE_HINT = {
+  feed: 'A feed can only crash. Its replacement resumes the sequence numbers and prices.',
+  strategy: 'The replacement replays the journal into its strategy before it takes live quotes.',
+  execution: 'The replacement asks the broker about every unreported signal before it resends anything.',
+  'position-monitor': 'The replacement rebuilds every position from the journal\'s fills, applying each order once.',
+};
+
+const nodeMenu = (() => {
+  const menu = $('node-menu');
+  let target = null;
+
+  function close() {
+    menu.hidden = true;
+    target = null;
+  }
+
+  function stateLine(component) {
+    const style = STATE_STYLE[component.state] ?? STATE_STYLE.healthy;
+    return h('span', { class: 'state', style: `color:${style.color}` },
+      h('span', { 'aria-hidden': 'true', text: `${style.glyph} ` }), h('span', { text: style.label }));
+  }
+
+  function fill() {
+    const data = state.latest;
+    if (!data || !target) return close();
+    const act = (name, value) => { sendControl(name, value); close(); };
+    if (target.gateways) {
+      menu.replaceChildren(
+        h('div', { class: 'title' }, h('strong', { text: 'API gateway pool' }),
+          h('span', { class: 'muted', text: `${data.gateways.healthy} of ${data.gateways.members.length} healthy` })),
+        h('p', { text: 'Taking a gateway down fails its connection. Its orders move to another gateway at once, under the same order id.' }),
+        h('div', { class: 'row' }, ...data.gateways.members.map((member, index) => {
+          const button = h('button', { class: 'ghost', type: 'button', text: `${member.down ? 'Bring up' : 'Take down'} ${member.name}` });
+          button.addEventListener('click', () => act(`fault.gateway:${index}`, member.down ? 0 : 1));
+          return button;
+        })));
+      return;
+    }
+    const component = data.resilience.components.find((item) => item.name === target.component);
+    if (!component) return close();
+    menu.replaceChildren(
+      h('div', { class: 'title' }, h('strong', { text: component.name }), stateLine(component)),
+      h('p', { text: `${KIND_LABEL[component.kind] ?? component.kind}, generation ${component.generation}. ${NODE_HINT[component.kind] ?? ''}` }),
+      h('div', { class: 'row' }, ...(FAULTS_FOR[component.kind] ?? []).map((kind) => {
+        const button = h('button', { class: 'ghost', type: 'button', title: FAULT_HELP[kind], text: FAULT_LABEL[kind] });
+        button.addEventListener('click', () => act(`fault.${kind}:${component.name}`, kind === 'hang' ? 8000 : 1));
+        return button;
+      })));
+  }
+
+  function open(next, clientX, clientY) {
+    target = next;
+    fill();
+    if (!target) return;
+    menu.hidden = false;
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    menu.style.left = `${clamp(clientX - width / 2, 8, window.innerWidth - width - 8)}px`;
+    menu.style.top = `${clientY + 12 + height > window.innerHeight - 8 ? Math.max(8, clientY - 12 - height) : clientY + 12}px`;
+    menu.querySelector('button')?.focus();
+  }
+
+  // Only the state line follows the live data while the menu is open, so its buttons never
+  // move under the pointer.
+  function refresh() {
+    if (menu.hidden || !target || target.gateways) return;
+    const component = state.latest?.resilience.components.find((item) => item.name === target.component);
+    const line = menu.querySelector('.title .state');
+    if (component && line) line.replaceWith(stateLine(component));
+  }
+
+  document.addEventListener('pointerdown', (event) => {
+    if (!menu.hidden && !menu.contains(event.target) && !event.target.classList?.contains('hit')) close();
+  });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !menu.hidden) close(); });
+  window.addEventListener('scroll', () => { if (!menu.hidden) close(); }, { passive: true });
+  return { open, refresh };
+})();
+
+// ---------------------------------------------------------------- journal and replay
+const SPEEDS = [['0.25', '0.25×'], ['0.5', '0.5×'], ['1', '1× recorded pace'], ['2', '2×'], ['5', '5×'], ['10', '10×'], ['max', 'max (lockstep)']];
+
+function speedOptions(selected) {
+  return SPEEDS.map(([value, text]) => h('option', { value, text, ...(value === selected ? { selected: 'selected' } : {}) }));
+}
+
+function buildReplayPanel() {
+  const root = $('replay-panel');
+  root.dataset.built = '1';
+
+  const mode = h('select', { id: 'replay-mode', 'aria-label': 'Replay mode' },
+    h('option', { value: 'rederive', text: 'Re-derive: strategies decide again' }),
+    h('option', { value: 'playback', text: 'Playback: show what happened' }));
+  const speed = h('select', { id: 'replay-speed', 'aria-label': 'Replay speed' }, ...speedOptions('max'));
+  const start = h('button', { class: 'primary', type: 'button', id: 'replay-start', text: 'Watch a replay' });
+  start.addEventListener('click', () => sendControl(`replay.start:${mode.value}`, speed.value));
+  const starter = h('div', { id: 'replay-starter' },
+    h('h3', { class: 'subhead', text: 'Replay this session' }),
+    h('div', { class: 'replay-row' }, h('label', {}, 'Mode ', mode), h('label', {}, 'Speed ', speed), start),
+    h('p', { class: 'note-line', id: 'replay-help',
+      text: 'Re-derive publishes the recorded quotes through the live strategies against a mock broker and checks the signals against what was recorded. ' +
+        'Max runs in lockstep with the consumers, so no quote is ever shed.' }));
+
+  const background = h('div', { id: 'replay-background', hidden: 'hidden' },
+    h('h3', { class: 'subhead', text: 'A replay is running beside the live system' }),
+    h('p', { class: 'note-line', id: 'replay-background-text' }),
+    h('div', { class: 'replay-row' },
+      (() => { const b = h('button', { class: 'primary', type: 'button', text: 'Show replay' }); b.addEventListener('click', () => sendControl('view.show', 'replay')); return b; })(),
+      (() => { const b = h('button', { class: 'ghost', type: 'button', text: 'Stop replay' }); b.addEventListener('click', () => sendControl('replay.stop', 1)); return b; })()));
+
+  const pause = h('button', { class: 'ghost', type: 'button', id: 'replay-pause', text: '⏸ Pause' });
+  pause.addEventListener('click', () => sendControl('replay.pause', pause.dataset.paused === '1' ? 0 : 1));
+  const runSpeed = h('select', { id: 'replay-run-speed', 'aria-label': 'Replay speed' }, ...speedOptions('1'));
+  runSpeed.addEventListener('change', () => { touched.set('replay-speed', performance.now()); sendControl('replay.speed', runSpeed.value); });
+  const seek = h('input', { type: 'range', min: '0', max: '1000', value: '0', id: 'replay-seek', 'aria-label': 'Position in the recording' });
+  const sendSeek = throttled((value) => sendControl('replay.seek', value));
+  seek.addEventListener('input', () => { touched.set('replay-seek', performance.now()); sendSeek(seek.value); });
+  const stop = h('button', { class: 'ghost', type: 'button', id: 'replay-stop', text: 'Stop replay' });
+  stop.addEventListener('click', () => sendControl('replay.stop', 1));
+
+  const run = h('div', { id: 'replay-run', hidden: 'hidden' },
+    h('h3', { class: 'subhead', text: 'Replay' }),
+    h('div', { class: 'replay-row' }, h('span', { class: 'chip', id: 'replay-state' }), h('span', { class: 'muted num', id: 'replay-position' })),
+    h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', id: 'replay-bar' }, h('div', { id: 'replay-fill' })),
+    h('div', { class: 'replay-row' }, pause, h('label', {}, 'Speed ', runSpeed), h('label', {}, 'Position ', seek), stop),
+    h('p', { class: 'note-line', id: 'replay-fidelity' }),
+    h('div', { class: 'verify', id: 'replay-verify' }));
+
+  root.append(starter, background, run);
+}
+
+function renderJournalReplay(data) {
+  // Journal statistics.
+  const journal = $('journal');
+  if (data.journal) {
+    const j = data.journal;
+    const stats = [
+      ['Records', fmt.count(j.records)], ['Rate', fmt.rate(j.rate)], ['Size', fmtBytes(j.bytes)], ['Segments', String(j.segments)],
+      ['Synced', `${fmt.count(j.fsyncs)}×`], ['Tap queue', `${fmt.count(j.tap_depth)} / ${fmt.count(j.tap_capacity)}`],
+      ['Gaps', j.gaps ? `${j.gaps} (${fmt.count(j.gap_events)} lost)` : 'none'], ['Repaired', j.repaired_bytes ? fmtBytes(j.repaired_bytes) : '—'],
+    ];
+    journal.replaceChildren(
+      h('div', { class: 'stats' }, ...stats.map(([k, v]) => h('div', { class: 'stat' }, h('div', { class: 'k', text: k }), h('div', { class: 'v', text: v })))),
+      h('p', { class: 'note-line', text: `Session ${j.session}, written to ${j.directory}. Quotes are stored by topic name with wall-clock times, each record checksummed; ` +
+        'a torn last record after a crash is truncated on reopening, and a damaged segment is set aside, never silently trimmed.' }));
+  } else if (data.replay) {
+    journal.replaceChildren(h('p', { class: 'note-line', text: `Reading session ${data.session.replace(/^replay-/, '')}: records ${fmt.count(data.replay.first)} to ${fmt.count(data.replay.last)}.` }));
+  } else {
+    journal.replaceChildren(h('p', { class: 'muted', text: 'Not recording. Start with --journal DIR (on by default with --dashboard).' }));
+  }
+
+  // Replay controls.
+  const root = $('replay-panel');
+  if (!root.dataset.built) buildReplayPanel();
+  const viewing = data.view === 'replay' && data.replay;
+  const background = data.view === 'live' && data.other_replay;
+  $('replay-starter').hidden = viewing || background || data.view === 'replay';
+  $('replay-start').disabled = !data.can_replay;
+  $('replay-help').textContent = data.can_replay
+    ? 'Re-derive publishes the recorded quotes through the live strategies against a mock broker and checks the signals against what was recorded. Max runs in lockstep with the consumers, so no quote is ever shed.'
+    : 'Replay needs a journal. Start with --journal DIR.';
+  $('replay-background').hidden = !background;
+  if (background) {
+    const r = data.other_replay;
+    $('replay-background-text').textContent = `${r.state} · ${Math.round(r.progress * 100)}% · ${MODE_LABEL[r.mode]}` +
+      (r.verification.enabled ? ` · ${(VERDICTS[r.verification.verdict] ?? VERDICTS.running).label}` : '');
+  }
+  $('replay-run').hidden = !viewing;
+  if (!viewing) return;
+
+  const r = data.replay;
+  const state = { running: ['⏵', 'var(--accent)', 'replaying'], paused: ['⏸', 'var(--warning)', 'paused'],
+    finished: ['■', 'var(--good)', 'finished'], failed: ['✕', 'var(--critical)', 'failed'], idle: ['○', 'var(--muted)', 'starting'] }[r.state];
+  $('replay-state').replaceChildren(h('span', { style: `color:${state[1]}`, 'aria-hidden': 'true', text: state[0] }), h('span', { text: state[2] }));
+  $('replay-position').textContent = `record ${fmt.count(r.current)} of ${fmt.count(r.last)} · ${r.position_s.toFixed(1)} s of ${r.span_s.toFixed(1)} s recorded · ` +
+    `${fmt.count(r.published)} published · ${r.pacing === 'lockstep' ? 'lockstep' : `${r.speed}× pace`} · ${r.elapsed_s.toFixed(1)} s elapsed`;
+  $('replay-fill').style.width = `${r.progress * 100}%`;
+  $('replay-bar').setAttribute('aria-valuenow', String(Math.round(r.progress * 100)));
+  const pause = $('replay-pause');
+  pause.dataset.paused = r.state === 'paused' ? '1' : '0';
+  pause.textContent = r.state === 'paused' ? '⏵ Resume' : '⏸ Pause';
+  pause.disabled = r.state === 'finished' || r.state === 'failed';
+  if (!recentlyTouched('replay-speed')) $('replay-run-speed').value = r.pacing === 'lockstep' ? 'max' : String(r.speed);
+  if (!recentlyTouched('replay-seek')) $('replay-seek').value = String(Math.round(r.progress * 1000));
+  $('replay-stop').hidden = !data.live_available;
+
+  const shed = sum(data.strategies, (strategy) => strategy.evicted);
+  const notes = [];
+  if (r.mode === 'rederive') {
+    notes.push(shed === 0 ? 'Fidelity: no quote has been shed, so every strategy saw the whole recording.'
+      : `Fidelity: ${fmt.count(shed)} quotes were shed by slow consumers, so a strategy may decide differently from the recording. Use max (lockstep) to avoid that.`);
+  } else {
+    notes.push('Playback: nothing is recomputed. No strategies run and no orders are sent; recorded fills rebuild the positions.');
+  }
+  if (r.gaps) notes.push(`The journal has ${r.gaps} gap${r.gaps === 1 ? '' : 's'}: ${fmt.count(r.gap_events)} events were lost while it was being recorded.`);
+  if (r.seeked) notes.push('The replay was moved, so the strategies started cold part-way through and cannot be compared with the recording.');
+  if (r.error) notes.push(`Error: ${r.error}`);
+  $('replay-fidelity').textContent = notes.join(' ');
+
+  const verify = $('replay-verify');
+  const v = r.verification;
+  verify.hidden = !v.enabled;
+  if (v.enabled) {
+    const style = VERDICTS[v.verdict] ?? VERDICTS.running;
+    const pending = Math.max(0, v.recorded - v.matched);
+    const restartedStrategies = v.outages.filter((name) => data.strategies.some((strategy) => strategy.name === name));
+    const counts = [['Recorded signals', v.recorded], ['Re-derived', v.rederived], ['Matched', v.matched],
+      [v.complete ? 'Missing' : 'Not yet seen', v.complete ? v.missing : pending], ['Extra', v.extra], ['Explained by restarts', v.explained]];
+    verify.replaceChildren(
+      h('div', { class: 'replay-row', style: 'margin:0' }, h('strong', { text: 'Verification against the recording' }),
+        h('span', { class: 'chip', style: `color:${style.color}` }, h('span', { 'aria-hidden': 'true', text: style.glyph }), h('span', { text: style.label }))),
+      h('div', { class: 'counts' }, ...counts.map(([k, n]) => h('div', { class: 'stat' }, h('div', { class: 'k', text: k }), h('div', { class: 'v', text: fmt.count(n) })))),
+      h('p', { class: 'note-line', text: sentence(v.note || 'A signal is identified by strategy, symbol, the sequence of the quote that caused it, and side: the same identity its order id is built from') +
+        (restartedStrategies.length ? ` Strategies restarted during the recording: ${restartedStrategies.join(', ')}.` : '') }));
+  }
 }
 
 // ---------------------------------------------------------------- start

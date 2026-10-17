@@ -52,6 +52,9 @@ struct TradingSignalEvent {
     static constexpr std::string_view kEventName = "TradingSignal";
 
     std::string strategy{};
+    // Causal identity: the sequence number of the quote that triggered the signal. It is
+    // unique per strategy and symbol, and a restarted or replayed strategy derives the same
+    // value from the same input, so order ids built from it are stable idempotency keys.
     std::uint64_t signal_id{};
     std::string symbol{};
     Side side{Side::buy};
@@ -78,6 +81,21 @@ struct ExecutionReportEvent {
     std::chrono::nanoseconds api_queue_delay{};
     std::chrono::nanoseconds rate_limit_wait{};
     std::chrono::nanoseconds api_service_time{};
+};
+
+// A supervisor decision (fault detected, component restarted, component quarantined).
+// Published so it is journaled next to the market data it affected and shown on the tape.
+struct SupervisionEvent {
+    static constexpr std::string_view kEventName = "Supervision";
+
+    std::string component{};
+    std::string action{};
+    std::string detail{};
+    std::uint64_t generation{};
+    // On a fault: how long it had been there when detected. On a restart: zero.
+    double detect_ms{};
+    double recovery_ms{};
+    TimePoint at{};
 };
 
 struct BenchmarkEvent {

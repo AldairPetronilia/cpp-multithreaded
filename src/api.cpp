@@ -154,6 +154,10 @@ std::uint64_t RequestHandle::id() const noexcept {
     return id_;
 }
 
+std::stop_token RequestHandle::token() const noexcept {
+    return cancellation_ ? cancellation_->source.get_token() : std::stop_token{};
+}
+
 class ApiRequestManager::Impl {
 public:
     struct RequestState {
@@ -270,6 +274,22 @@ public:
 
         lock.lock();
         joined_ = true;
+    }
+
+    [[nodiscard]] OrderLookupResult lookup(const std::string& idempotency_key) {
+        if (idempotency_key.empty()) {
+            return {};
+        }
+        {
+            std::lock_guard lock(mutex_);
+            for (const auto& [id, state] : requests_) {
+                static_cast<void>(id);
+                if (state->request.idempotency_key == idempotency_key) {
+                    return {OrderLookup::in_flight, {}};
+                }
+            }
+        }
+        return client_->lookup(idempotency_key);
     }
 
     [[nodiscard]] ApiManagerStats stats() const {
@@ -412,7 +432,8 @@ private:
         // Only idempotent requests carrying a key are retried: the key lets the server
         // discard a duplicate if the first attempt actually executed.
         const bool retry_safe = state->request.idempotent && !state->request.idempotency_key.empty();
-        if (!cancellation.stop_requested() && retry_safe && is_retryable(response) &&
+        const bool retry_here = config_.retry_connection_failures || response.error != ApiError::connection_failure;
+        if (!cancellation.stop_requested() && retry_safe && retry_here && is_retryable(response) &&
             state->attempt <= config_.max_retries) {
             const auto delay = response.retry_after > std::chrono::milliseconds::zero()
                                    ? response.retry_after
@@ -525,6 +546,10 @@ void ApiRequestManager::shutdown(ApiShutdownMode mode,
     impl_->shutdown(mode, drain_timeout);
 }
 
+OrderLookupResult ApiRequestManager::lookup(const std::string& idempotency_key) {
+    return impl_->lookup(idempotency_key);
+}
+
 ApiManagerStats ApiRequestManager::stats() const {
     return impl_->stats();
 }
@@ -595,6 +620,15 @@ ApiResponse MockTradingApi::perform(const ApiRequest& request, std::stop_token c
         remember(request.idempotency_key, response);
     }
     return response;
+}
+
+OrderLookupResult MockTradingApi::lookup(const std::string& idempotency_key) {
+    std::lock_guard lock(idempotency_mutex_);
+    const auto found = completed_idempotent_requests_.find(idempotency_key);
+    if (found == completed_idempotent_requests_.end()) {
+        return {};
+    }
+    return {OrderLookup::completed, found->second};
 }
 
 void MockTradingApi::remember(const std::string& key, const ApiResponse& response) {
