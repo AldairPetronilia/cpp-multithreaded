@@ -63,6 +63,11 @@ EventWorker::EventWorker(std::string name, EventBus& event_bus, WorkerOptions op
 
 EventWorker::~EventWorker() {
     stop();
+    // An abandoned worker's thread is still owned here; its owner keeps the object alive
+    // until the thread has finished, so this join does not wait.
+    if (thread_.joinable()) {
+        thread_.join();
+    }
 }
 
 void EventWorker::ensure_not_started_locked() const {
@@ -70,6 +75,12 @@ void EventWorker::ensure_not_started_locked() const {
         throw std::logic_error("subscriptions must be registered before worker " + name_ +
                                " starts");
     }
+}
+
+void EventWorker::set_start_hook(std::function<void()> hook) {
+    std::lock_guard lock(lifecycle_mutex_);
+    ensure_not_started_locked();
+    start_hook_ = std::move(hook);
 }
 
 void EventWorker::start() {
@@ -103,6 +114,50 @@ void EventWorker::stop() {
     }
 }
 
+void EventWorker::abandon() {
+    std::lock_guard lock(lifecycle_mutex_);
+    if (stopped_) {
+        return;
+    }
+    stopped_ = true;
+    abandoned_.store(true, std::memory_order_release);
+    subscriptions_.clear();
+    mailbox_->close();
+}
+
+bool EventWorker::wait_ready(std::chrono::milliseconds timeout) {
+    waiters_.fetch_add(1, std::memory_order_relaxed);
+    std::unique_lock lock(wait_mutex_);
+    const auto ready = wait_cv_.wait_for(lock, timeout, [this] {
+        return ready_.load(std::memory_order_acquire) || finished_.load(std::memory_order_acquire);
+    });
+    waiters_.fetch_sub(1, std::memory_order_relaxed);
+    return ready;
+}
+
+bool EventWorker::wait_until_drained(std::chrono::milliseconds timeout) {
+    const auto drained = [this] {
+        // Everything accepted is either handled or was evicted before it could be.
+        const auto mailbox = mailbox_->stats();
+        return processed_.load(std::memory_order_acquire) + mailbox.evicted_oldest >= mailbox.accepted ||
+               finished_.load(std::memory_order_acquire);
+    };
+    const auto deadline = MonotonicClock::now() + timeout;
+    waiters_.fetch_add(1, std::memory_order_relaxed);
+    std::unique_lock lock(wait_mutex_);
+    bool result = true;
+    // Short slices make a missed notification cost microseconds, not the whole timeout.
+    while (!drained()) {
+        if (MonotonicClock::now() >= deadline) {
+            result = false;
+            break;
+        }
+        wait_cv_.wait_for(lock, std::chrono::milliseconds(2));
+    }
+    waiters_.fetch_sub(1, std::memory_order_relaxed);
+    return result;
+}
+
 WorkerStats EventWorker::stats() const {
     return WorkerStats{
         name_,
@@ -111,24 +166,103 @@ WorkerStats EventWorker::stats() const {
         std::chrono::nanoseconds(busy_ns_.load(std::memory_order_relaxed)),
         mailbox_->stats(),
         dispatch_latency_.snapshot(),
+        consecutive_errors_.load(std::memory_order_relaxed),
+        crashed_.load(std::memory_order_relaxed),
     };
 }
 
+WorkerHealth EventWorker::health() const {
+    WorkerHealth health;
+    health.crashed = crashed_.load(std::memory_order_acquire);
+    health.finished = finished_.load(std::memory_order_acquire);
+    health.abandoned = abandoned_.load(std::memory_order_acquire);
+    health.ready = ready_.load(std::memory_order_acquire);
+    health.processed = processed_.load(std::memory_order_relaxed);
+    health.backlog = mailbox_->size();
+    health.consecutive_errors = consecutive_errors_.load(std::memory_order_relaxed);
+    const auto since = handler_since_ns_.load(std::memory_order_relaxed);
+    if (since != 0) {
+        health.handler_running_for =
+            std::chrono::nanoseconds(MonotonicClock::now().time_since_epoch().count() - since);
+    }
+    std::lock_guard lock(error_mutex_);
+    health.error = last_error_;
+    return health;
+}
+
+void EventWorker::mark_ready() {
+    ready_.store(true, std::memory_order_release);
+    { std::lock_guard lock(wait_mutex_); }
+    wait_cv_.notify_all();
+}
+
+void EventWorker::note_handler_error(const char* what) {
+    const auto errors = handler_errors_.fetch_add(1, std::memory_order_relaxed) + 1U;
+    consecutive_errors_.fetch_add(1, std::memory_order_relaxed);
+    // A worker failing on every event would otherwise fill the console at event rate.
+    if (errors <= 3U || errors % 1'000U == 0U) {
+        report_failure(name_, (std::string(what) + " (" + std::to_string(errors) + " errors so far)").c_str());
+    }
+}
+
+void EventWorker::record_crash(const char* what) {
+    {
+        std::lock_guard lock(error_mutex_);
+        last_error_ = what;
+    }
+    handler_since_ns_.store(0, std::memory_order_relaxed);
+    crashed_.store(true, std::memory_order_release);
+    report_failure(name_, what);
+}
+
 void EventWorker::run() {
+    // Nothing may escape the thread: an uncaught exception would terminate the process.
+    // A worker that dies is left in place, marked crashed, for its supervisor to replace.
+    try {
+        if (start_hook_) {
+            try {
+                start_hook_();
+            } catch (const std::exception& exception) {
+                // Recovery is best effort; the worker still serves live traffic.
+                handler_errors_.fetch_add(1, std::memory_order_relaxed);
+                report_failure(name_, exception.what());
+            }
+        }
+        mark_ready();
+        run_loop();
+    } catch (const std::exception& exception) {
+        record_crash(exception.what());
+    } catch (...) {
+        record_crash("unknown exception");
+    }
+    finished_.store(true, std::memory_order_release);
+    { std::lock_guard lock(wait_mutex_); }
+    wait_cv_.notify_all();
+}
+
+void EventWorker::run_loop() {
     std::vector<EventEnvelope> batch;
     batch.reserve(options_.max_batch);
     while (mailbox_->wait_pop_batch(batch, options_.max_batch)) {
         auto handler_started = MonotonicClock::now();
         for (const auto& envelope : batch) {
+            // An abandoned worker is a zombie: it must not touch state any more.
+            if (abandoned_.load(std::memory_order_relaxed)) {
+                break;
+            }
             dispatch_latency_.record(handler_started - envelope.published_at);
+            handler_since_ns_.store(handler_started.time_since_epoch().count(), std::memory_order_relaxed);
             try {
                 handler_(envelope);
+                if (consecutive_errors_.load(std::memory_order_relaxed) != 0U) {
+                    consecutive_errors_.store(0, std::memory_order_relaxed);
+                }
+            } catch (const FatalWorkerError&) {
+                throw;
             } catch (const std::exception& exception) {
-                handler_errors_.fetch_add(1, std::memory_order_relaxed);
-                report_failure(name_, exception.what());
+                note_handler_error(exception.what());
             } catch (...) {
-                handler_errors_.fetch_add(1, std::memory_order_relaxed);
-                report_failure(name_, "unknown exception");
+                note_handler_error("unknown exception");
             }
             // Per-event updates keep rates and utilisation smooth when handlers are slow.
             // This thread is the only writer, so the relaxed increments are uncontended.
@@ -137,23 +271,39 @@ void EventWorker::run() {
             processed_.fetch_add(1, std::memory_order_relaxed);
             handler_started = handler_finished;
         }
+        handler_since_ns_.store(0, std::memory_order_relaxed);
         // Release payloads now rather than when the next batch overwrites them.
         batch.clear();
+        if (waiters_.load(std::memory_order_relaxed) > 0) {
+            { std::lock_guard lock(wait_mutex_); }
+            wait_cv_.notify_all();
+        }
     }
 }
 
 MarketDataProducer::MarketDataProducer(EventBus& event_bus, MarketDataProducerConfig config)
-    : event_bus_(event_bus), config_(std::move(config)), interval_us_(config_.interval.count()) {
+    : event_bus_(event_bus),
+      config_(std::move(config)),
+      interval_us_(config_.interval.count()),
+      next_round_(config_.start_round) {
     if (config_.instruments.empty() || config_.interval < std::chrono::microseconds::zero()) {
         throw std::invalid_argument("feed " + config_.name + " needs instruments and a non-negative interval");
     }
+    if (!config_.start_prices.empty() && config_.start_prices.size() != config_.instruments.size()) {
+        throw std::invalid_argument("feed " + config_.name + " resume prices must match its instruments");
+    }
     std::set<std::string> seen;
-    for (const auto& instrument : config_.instruments) {
+    last_prices_ = std::make_unique<std::atomic<double>[]>(config_.instruments.size());
+    for (std::size_t index = 0; index < config_.instruments.size(); ++index) {
+        const auto& instrument = config_.instruments[index];
         if (instrument.symbol.empty() || instrument.reference_price <= 0.0 ||
             instrument.volatility_bps < 0.0 || !seen.insert(instrument.symbol).second) {
             throw std::invalid_argument("feed " + config_.name + " has an invalid or duplicate instrument");
         }
         topics_.push_back(event_bus_.topic(instrument.symbol));
+        last_prices_[index].store(config_.start_prices.empty() ? instrument.reference_price
+                                                               : config_.start_prices[index],
+                                  std::memory_order_relaxed);
     }
 }
 
@@ -207,9 +357,19 @@ ProducerStats MarketDataProducer::stats() const {
     stats.failures = failures_.load(std::memory_order_relaxed);
     stats.interval = std::chrono::microseconds(interval_us_.load(std::memory_order_relaxed));
     stats.finished = finished_.load(std::memory_order_acquire);
+    stats.crashed = crashed_.load(std::memory_order_acquire);
     std::lock_guard lock(control_mutex_);
     stats.paused = paused_;
     return stats;
+}
+
+FeedResumePoint MarketDataProducer::resume_point() const {
+    FeedResumePoint point;
+    point.next_round = next_round_.load(std::memory_order_acquire);
+    for (std::size_t index = 0; index < config_.instruments.size(); ++index) {
+        point.prices.push_back(last_prices_[index].load(std::memory_order_relaxed));
+    }
+    return point;
 }
 
 bool MarketDataProducer::wait_for_next_round(std::stop_token stop_token, TimePoint& next_round) {
@@ -242,15 +402,19 @@ void MarketDataProducer::run(std::stop_token stop_token) {
         std::mt19937_64 random(config_.seed);
         std::normal_distribution<double> shock(0.0, 1.0);
         std::vector<double> prices;
-        for (const auto& instrument : config_.instruments) {
-            prices.push_back(instrument.reference_price);
+        for (std::size_t index = 0; index < config_.instruments.size(); ++index) {
+            prices.push_back(config_.start_prices.empty() ? config_.instruments[index].reference_price
+                                                          : config_.start_prices[index]);
         }
 
         auto next_round = MonotonicClock::now();
-        for (std::uint64_t round = 0;
+        for (std::uint64_t round = config_.start_round;
              config_.events_per_instrument == 0U || round < config_.events_per_instrument; ++round) {
             if (!wait_for_next_round(stop_token, next_round)) {
                 break;
+            }
+            if (crash_requested_.exchange(false, std::memory_order_relaxed)) {
+                throw std::runtime_error("injected feed failure");
             }
             for (std::size_t index = 0; index < prices.size(); ++index) {
                 const auto& instrument = config_.instruments[index];
@@ -267,7 +431,9 @@ void MarketDataProducer::run(std::stop_token stop_token) {
                 events_published_.fetch_add(1, std::memory_order_relaxed);
                 subscriber_rejections_.fetch_add(result.rejected_full + result.rejected_closed,
                                                  std::memory_order_relaxed);
+                last_prices_[index].store(price, std::memory_order_relaxed);
             }
+            next_round_.store(round + 1U, std::memory_order_release);
 
             // An absolute schedule keeps the rate independent of publish cost; after a stall
             // longer than one interval the schedule restarts instead of bursting to catch up.
@@ -277,9 +443,11 @@ void MarketDataProducer::run(std::stop_token stop_token) {
         }
     } catch (const std::exception& exception) {
         failures_.fetch_add(1, std::memory_order_relaxed);
+        crashed_.store(true, std::memory_order_release);
         report_failure(config_.name, exception.what());
     } catch (...) {
         failures_.fetch_add(1, std::memory_order_relaxed);
+        crashed_.store(true, std::memory_order_release);
         report_failure(config_.name, "unknown exception");
     }
     finished_.store(true, std::memory_order_release);
@@ -308,12 +476,28 @@ SignalProcessor::SignalProcessor(EventBus& event_bus,
     }
 }
 
+void SignalProcessor::set_fence(std::shared_ptr<GenerationGate> gate, std::uint64_t generation) {
+    gate_ = std::move(gate);
+    generation_ = generation;
+}
+
+void SignalProcessor::set_catch_up(CatchUpSource source) {
+    catch_up_source_ = std::move(source);
+    if (catch_up_source_) {
+        worker_.set_start_hook([this] { catch_up(); });
+    }
+}
+
 void SignalProcessor::start() {
     worker_.start();
 }
 
 void SignalProcessor::stop() {
     worker_.stop();
+}
+
+void SignalProcessor::abandon() {
+    worker_.abandon();
 }
 
 SignalProcessorStats SignalProcessor::stats() const {
@@ -324,13 +508,50 @@ SignalProcessorStats SignalProcessor::stats() const {
         signals_published_.load(std::memory_order_relaxed),
         publish_rejections_.load(std::memory_order_relaxed),
         tick_to_signal_.snapshot(),
+        recovered_records_.load(std::memory_order_relaxed),
+        dead_letters_.load(std::memory_order_relaxed),
+        gate_ ? gate_->fenced_writes() : 0U,
+        static_cast<double>(catch_up_ns_.load(std::memory_order_relaxed)) / 1e6,
     };
+}
+
+void SignalProcessor::catch_up() {
+    const auto started = MonotonicClock::now();
+    std::uint64_t delivered = 0;
+    // The strategy sees the history exactly as the failed instance did, but its signals are
+    // discarded: they were either already published or are too old to act on.
+    catch_up_source_(config_.symbols, [this, &delivered](const MarketDataEvent& quote) {
+        try {
+            static_cast<void>(strategy_->on_market_data(quote));
+        } catch (...) {
+            // A quote that makes the strategy throw is dead-lettered, so a deterministic
+            // poison event cannot send the replacement into a restart loop.
+            dead_letters_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        auto& applied = applied_[quote.symbol];
+        applied = std::max(applied, quote.sequence);
+        ++delivered;
+    });
+    dedupe_active_ = !applied_.empty();
+    recovered_records_.store(delivered, std::memory_order_relaxed);
+    catch_up_ns_.store((MonotonicClock::now() - started).count(), std::memory_order_relaxed);
 }
 
 void SignalProcessor::on_event(const EventEnvelope& envelope) {
     const auto* quote = envelope.as<MarketDataEvent>();
     if (quote == nullptr) {
         return;
+    }
+    if (dedupe_active_) {
+        const auto applied = applied_.find(quote->symbol);
+        if (applied != applied_.end()) {
+            if (quote->sequence <= applied->second) {
+                return;
+            }
+            applied_.erase(applied);
+            dedupe_active_ = !applied_.empty();
+        }
     }
     const auto side = strategy_->on_market_data(*quote);
     if (!side) {
@@ -339,16 +560,25 @@ void SignalProcessor::on_event(const EventEnvelope& envelope) {
 
     const auto now = MonotonicClock::now();
     tick_to_signal_.record(now - quote->source_time);
-    const auto result = event_bus_.publish(TradingSignalEvent{
+    TradingSignalEvent signal{
         .strategy = config_.name,
-        .signal_id = next_signal_id_++,
+        .signal_id = quote->sequence,
         .symbol = quote->symbol,
         .side = *side,
         .quantity = config_.order_quantity,
         .reference_price = quote->price,
         .market_data_time = quote->source_time,
         .signal_time = now,
-    });
+    };
+    PublishResult result;
+    const auto publish = [&] { result = event_bus_.publish(std::move(signal)); };
+    if (gate_ != nullptr) {
+        if (!gate_->run_if_current(generation_, publish)) {
+            return;
+        }
+    } else {
+        publish();
+    }
     signals_published_.fetch_add(1, std::memory_order_relaxed);
     publish_rejections_.fetch_add(result.rejected_full + result.rejected_closed,
                                   std::memory_order_relaxed);
@@ -369,6 +599,18 @@ OrderExecutionWorker::OrderExecutionWorker(EventBus& event_bus,
     worker_.subscribe<TradingSignalEvent>();
 }
 
+void OrderExecutionWorker::set_fence(std::shared_ptr<GenerationGate> gate, std::uint64_t generation) {
+    gate_ = std::move(gate);
+    generation_ = generation;
+}
+
+void OrderExecutionWorker::set_recovery(std::function<void(OrderExecutionWorker&)> recovery) {
+    recovery_ = std::move(recovery);
+    if (recovery_) {
+        worker_.set_start_hook([this] { recovery_(*this); });
+    }
+}
+
 void OrderExecutionWorker::start() {
     worker_.start();
 }
@@ -377,28 +619,49 @@ void OrderExecutionWorker::stop() {
     worker_.stop();
 }
 
+void OrderExecutionWorker::abandon() {
+    worker_.abandon();
+}
+
 ExecutionStats OrderExecutionWorker::stats() const {
     return ExecutionStats{
         worker_.stats(),
         requests_submitted_.load(std::memory_order_relaxed),
         requests_rejected_.load(std::memory_order_relaxed),
         report_publish_rejections_->load(std::memory_order_relaxed),
+        ExecutionRecoveryStats{
+            recovery_examined_.load(std::memory_order_relaxed),
+            recovery_resubmitted_.load(std::memory_order_relaxed),
+            recovery_in_flight_.load(std::memory_order_relaxed),
+            recovery_completed_.load(std::memory_order_relaxed),
+            recovery_expired_.load(std::memory_order_relaxed),
+        },
+        gate_ ? gate_->fenced_writes() : 0U,
     };
 }
 
-void OrderExecutionWorker::on_event(const EventEnvelope& envelope) {
-    const auto* signal = envelope.as<TradingSignalEvent>();
-    if (signal == nullptr) {
-        return;
+std::string OrderExecutionWorker::order_id_for(const TradingSignalEvent& signal) const {
+    // Order ids double as broker idempotency keys. The signal id is the triggering quote's
+    // sequence, so the id is the same for a restarted or replayed strategy, and it is unique
+    // across strategies and symbols. The session keeps one run's ids from meeting another's
+    // inside the broker's deduplication window.
+    std::string id;
+    if (!config_.session.empty()) {
+        id += config_.session;
+        id += ':';
     }
+    id += signal.strategy;
+    id += ':';
+    id += signal.symbol;
+    id += ':';
+    id += std::to_string(signal.signal_id);
+    return id;
+}
 
-    // Order ids double as idempotency keys, and strategies number their signals
-    // independently, so the id must be qualified by strategy or the broker would treat
-    // two strategies' first orders as duplicates of each other.
-    auto order_id = signal->strategy + '-' + std::to_string(signal->signal_id);
+void OrderExecutionWorker::submit_order(const TradingSignalEvent& signal, const std::string& order_id) {
     std::ostringstream body;
-    body << "symbol=" << signal->symbol << "&side=" << to_string(signal->side)
-         << "&quantity=" << signal->quantity << "&price=" << signal->reference_price;
+    body << "symbol=" << signal.symbol << "&side=" << to_string(signal.side)
+         << "&quantity=" << signal.quantity << "&price=" << signal.reference_price;
 
     ApiRequest request;
     request.endpoint = "/v1/orders";
@@ -407,31 +670,100 @@ void OrderExecutionWorker::on_event(const EventEnvelope& envelope) {
     request.idempotent = true;
     request.timeout = config_.request_timeout;
 
-    const auto result = request_manager_.submit(
-        std::move(request),
-        [bus = &event_bus_, rejections = report_publish_rejections_, signal_copy = *signal,
-         order_id](ApiResponse response) {
-            publish_execution_report(*bus, *rejections, signal_copy, order_id, response);
-        });
+    const auto submit = [&] {
+        const auto result = request_manager_.submit(
+            std::move(request),
+            [bus = &event_bus_, rejections = report_publish_rejections_, signal_copy = signal,
+             order_id](ApiResponse response) {
+                publish_execution_report(*bus, *rejections, signal_copy, order_id, response);
+            });
 
-    if (result.accepted()) {
-        requests_submitted_.fetch_add(1, std::memory_order_relaxed);
-        return;
+        if (result.accepted()) {
+            requests_submitted_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        requests_rejected_.fetch_add(1, std::memory_order_relaxed);
+        ApiResponse rejection;
+        rejection.error = ApiError::internal_error;
+        rejection.message = result.status == SubmitStatus::queue_full ? "API request queue full"
+                                                                      : "API request manager shutting down";
+        publish_execution_report(event_bus_, *report_publish_rejections_, signal, order_id, rejection);
+    };
+    // A replaced worker must not place orders: the check and the submit are one step.
+    if (gate_ != nullptr) {
+        gate_->run_if_current(generation_, submit);
+    } else {
+        submit();
     }
-    requests_rejected_.fetch_add(1, std::memory_order_relaxed);
-    ApiResponse rejection;
-    rejection.error = ApiError::internal_error;
-    rejection.message = result.status == SubmitStatus::queue_full ? "API request queue full"
-                                                                  : "API request manager shutting down";
-    publish_execution_report(event_bus_, *report_publish_rejections_, *signal, order_id, rejection);
 }
 
-void PositionBook::apply(const ExecutionReportEvent& execution) {
-    if (!execution.filled) {
+void OrderExecutionWorker::on_event(const EventEnvelope& envelope) {
+    const auto* signal = envelope.as<TradingSignalEvent>();
+    if (signal == nullptr) {
         return;
+    }
+    if (fault_ != nullptr) {
+        fault_->on_event();
+    }
+    const auto order_id = order_id_for(*signal);
+    if (!recovered_ids_.empty() && recovered_ids_.contains(order_id)) {
+        return;
+    }
+    submit_order(*signal, order_id);
+}
+
+void OrderExecutionWorker::reconcile(const TradingSignalEvent& signal, std::chrono::nanoseconds age) {
+    const auto order_id = order_id_for(signal);
+    if (!recovered_ids_.insert(order_id).second) {
+        return;
+    }
+    recovery_examined_.fetch_add(1, std::memory_order_relaxed);
+
+    // The journal alone cannot say whether the order reached the broker before the failure,
+    // so ask before sending anything: a duplicate window is only as good as the venue's.
+    const auto known = request_manager_.lookup(order_id);
+    switch (known.state) {
+        case OrderLookup::in_flight:
+            // Still travelling through the gateway; its completion will publish the report.
+            recovery_in_flight_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        case OrderLookup::completed:
+            recovery_completed_.fetch_add(1, std::memory_order_relaxed);
+            publish_execution_report(event_bus_, *report_publish_rejections_, signal, order_id, known.response);
+            return;
+        case OrderLookup::unknown:
+            break;
+    }
+
+    if (age > config_.stale_signal_after) {
+        recovery_expired_.fetch_add(1, std::memory_order_relaxed);
+        ApiResponse expired;
+        expired.error = ApiError::cancelled;
+        expired.message = "signal expired during recovery; not resubmitted";
+        publish_execution_report(event_bus_, *report_publish_rejections_, signal, order_id, expired);
+        return;
+    }
+    recovery_resubmitted_.fetch_add(1, std::memory_order_relaxed);
+    submit_order(signal, order_id);
+}
+
+ApplyResult PositionBook::apply(const ExecutionReportEvent& execution) {
+    if (!execution.filled) {
+        return ApplyResult::not_filled;
     }
     const auto signed_quantity = execution.side == Side::buy ? execution.quantity : -execution.quantity;
     std::lock_guard lock(mutex_);
+    if (!execution.client_order_id.empty()) {
+        if (!applied_ids_.insert(execution.client_order_id).second) {
+            ++duplicates_ignored_;
+            return ApplyResult::duplicate;
+        }
+        applied_order_.push_back(execution.client_order_id);
+        while (applied_order_.size() > kDedupeWindow) {
+            applied_ids_.erase(applied_order_.front());
+            applied_order_.pop_front();
+        }
+    }
     auto& entry = positions_[{execution.strategy, execution.symbol}];
     if (entry.fills == 0U) {
         entry.strategy = execution.strategy;
@@ -441,6 +773,7 @@ void PositionBook::apply(const ExecutionReportEvent& execution) {
     entry.cash -= signed_quantity * execution.fill_price;
     ++entry.fills;
     ++fills_applied_;
+    return ApplyResult::applied;
 }
 
 std::vector<PositionEntry> PositionBook::snapshot() const {
@@ -476,6 +809,11 @@ std::uint64_t PositionBook::fills_applied() const {
     return fills_applied_;
 }
 
+std::uint64_t PositionBook::duplicates_ignored() const {
+    std::lock_guard lock(mutex_);
+    return duplicates_ignored_;
+}
+
 PositionMonitor::PositionMonitor(EventBus& event_bus,
                                  PositionBook& position_book,
                                  PositionMonitorConfig config)
@@ -483,6 +821,12 @@ PositionMonitor::PositionMonitor(EventBus& event_bus,
       worker_("position-monitor", event_bus, config.worker,
               [this](const EventEnvelope& envelope) { on_event(envelope); }) {
     worker_.subscribe<ExecutionReportEvent>();
+}
+
+void PositionMonitor::set_recovery(std::function<void()> recovery) {
+    if (recovery) {
+        worker_.set_start_hook(std::move(recovery));
+    }
 }
 
 void PositionMonitor::start() {
@@ -493,11 +837,16 @@ void PositionMonitor::stop() {
     worker_.stop();
 }
 
+void PositionMonitor::abandon() {
+    worker_.abandon();
+}
+
 PositionMonitorStats PositionMonitor::stats() const {
     return PositionMonitorStats{
         worker_.stats(),
         fills_.load(std::memory_order_relaxed),
         rejections_.load(std::memory_order_relaxed),
+        duplicates_.load(std::memory_order_relaxed),
         end_to_end_.snapshot(),
         api_queue_.snapshot(),
         rate_limit_wait_.snapshot(),
@@ -510,7 +859,13 @@ void PositionMonitor::on_event(const EventEnvelope& envelope) {
     if (execution == nullptr) {
         return;
     }
-    position_book_.apply(*execution);
+    if (fault_ != nullptr) {
+        fault_->on_event();
+    }
+    if (position_book_.apply(*execution) == ApplyResult::duplicate) {
+        duplicates_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     (execution->filled ? fills_ : rejections_).fetch_add(1, std::memory_order_relaxed);
     end_to_end_.record(MonotonicClock::now() - execution->market_data_time);
     // Requests rejected before reaching the API have no API timings worth recording.
@@ -533,6 +888,7 @@ ActivityRecorder::ActivityRecorder(EventBus& event_bus, ActivityRecorderConfig c
     worker_.subscribe<MarketDataEvent>();
     worker_.subscribe<TradingSignalEvent>();
     worker_.subscribe<ExecutionReportEvent>();
+    worker_.subscribe<SupervisionEvent>();
 }
 
 void ActivityRecorder::start() {
@@ -590,6 +946,18 @@ void ActivityRecorder::on_event(const EventEnvelope& envelope) {
             std::chrono::duration<double, std::milli>(execution->execution_time -
                                                       execution->market_data_time).count(),
             execution->client_order_id + ": " + execution->message,
+        });
+    } else if (const auto* supervision = envelope.as<SupervisionEvent>()) {
+        append_tape(TapeEntry{
+            TapeEntry::Kind::supervision,
+            seconds_since_epoch(supervision->at),
+            supervision->component,
+            {},
+            Side::buy,
+            0.0,
+            0.0,
+            supervision->recovery_ms,
+            supervision->action + ": " + supervision->detail,
         });
     }
 }

@@ -1,3 +1,4 @@
+#include "check.hpp"
 #include "trading/api.hpp"
 #include "trading/events.hpp"
 #include "trading/messaging.hpp"
@@ -37,36 +38,15 @@
 #include <utility>
 #include <vector>
 
+// Defined in resilience_tests.cpp.
+std::vector<std::pair<std::string, std::function<void()>>> resilience_tests();
+
 namespace {
 
 using namespace std::chrono_literals;
 
-class TestFailure final : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-
-#define CHECK(expression)                                                                  \
-    do {                                                                                   \
-        if (!(expression)) {                                                               \
-            std::ostringstream failure_message;                                            \
-            failure_message << __FILE__ << ':' << __LINE__ << ": check failed: "          \
-                            << #expression;                                                \
-            throw TestFailure(failure_message.str());                                      \
-        }                                                                                  \
-    } while (false)
-
-// Polls a condition in tests only; production code waits on condition variables instead.
-bool eventually(const std::function<bool()>& condition, std::chrono::milliseconds timeout) {
-    const auto deadline = trading::MonotonicClock::now() + timeout;
-    while (!condition()) {
-        if (trading::MonotonicClock::now() >= deadline) {
-            return false;
-        }
-        std::this_thread::sleep_for(1ms);
-    }
-    return true;
-}
+using testing_support::eventually;
+using testing_support::TestFailure;
 
 trading::MarketDataEvent quote(std::string symbol, double price, std::uint64_t sequence = 1) {
     return trading::MarketDataEvent{std::move(symbol), price, sequence, trading::MonotonicClock::now()};
@@ -499,7 +479,7 @@ void order_ids_are_unique_across_strategies() {
     const auto subscription = bus.subscribe<trading::ExecutionReportEvent>(reports);
     execution.start();
 
-    // Both strategies number their first signal 1; their orders must not share a key.
+    // Both strategies' first signals are caused by quote 1; their orders must not share a key.
     for (const char* strategy : {"alpha", "beta"}) {
         const auto now = trading::MonotonicClock::now();
         CHECK(bus.publish(trading::TradingSignalEvent{
@@ -518,9 +498,11 @@ void order_ids_are_unique_across_strategies() {
     execution.stop();
     manager.shutdown();
 
+    // The id is built from what caused the signal, so it is the same for a restarted or
+    // replayed strategy, and distinct across strategies.
     auto keys = client->keys();
     std::sort(keys.begin(), keys.end());
-    CHECK(keys == (std::vector<std::string>{"alpha-1", "beta-1"}));
+    CHECK(keys == (std::vector<std::string>{"alpha:AAPL:1", "beta:AAPL:1"}));
     for (const auto& envelope : drain(*reports)) {
         CHECK(envelope.as<trading::ExecutionReportEvent>()->filled);
     }
@@ -1136,7 +1118,7 @@ void dashboard_server_serves_page_stream_and_controls() {
 }  // namespace
 
 int main() {
-    const std::vector<std::pair<std::string, std::function<void()>>> tests{
+    std::vector<std::pair<std::string, std::function<void()>>> tests{
         {"messaging fan-out and type filtering", messaging_delivers_to_every_matching_subscriber},
         {"topic routing per strategy", topics_partition_market_data_between_strategies},
         {"unsubscribe stops delivery", unsubscribing_stops_delivery},
@@ -1166,6 +1148,9 @@ int main() {
         {"dashboard server", dashboard_server_serves_page_stream_and_controls},
 #endif
     };
+    for (auto& test : resilience_tests()) {
+        tests.push_back(std::move(test));
+    }
 
     std::size_t failures = 0;
     for (const auto& [name, test] : tests) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "trading/control.hpp"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -17,11 +19,6 @@ struct DashboardServerConfig {
     std::uint16_t port{8080};
     std::chrono::milliseconds publish_interval{200};
     std::size_t max_clients{32};
-};
-
-struct ControlResult {
-    int status{200};
-    std::string body{"{\"ok\":true}"};
 };
 
 // Minimal single-threaded HTTP/1.1 server for the live dashboard (POSIX sockets, poll).

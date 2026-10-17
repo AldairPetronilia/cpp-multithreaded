@@ -149,6 +149,49 @@ td svg.spark { width: 110px; height: 22px; display: block; }
 .down { color: var(--down); }
 .status-icon { font-size: 12px; }
 
+/* Resilience */
+.subhead { font-size: 12px; font-weight: 650; color: var(--ink-2); margin: 14px 0 6px; text-transform: uppercase; letter-spacing: 0.04em; }
+.stack-list { display: grid; gap: 8px; }
+.component { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(150px, 1.1fr) auto; gap: 4px 12px; align-items: center;
+  padding: 8px 10px; border-radius: 10px; background: var(--wash); box-shadow: inset 0 0 0 1.5px transparent;
+  transition: box-shadow 160ms, background-color 160ms; }
+.component .who { display: flex; flex-direction: column; min-width: 0; }
+.component .who small { color: var(--muted); font-size: 11px; }
+.component .state { display: inline-flex; align-items: center; gap: 6px; font-weight: 650; }
+.component .state .glyph { display: inline-block; min-width: 1.1em; text-align: center; }
+.component .meta { color: var(--muted); font-size: 11px; display: block; font-weight: 400; }
+.component .detail { grid-column: 1 / -1; font-size: 12px; color: var(--ink-2); min-height: 16px; }
+.component.fault { box-shadow: inset 0 0 0 1.5px var(--critical); background: rgba(208, 59, 59, 0.08); }
+.component.working { box-shadow: inset 0 0 0 1.5px var(--warning); background: rgba(250, 178, 25, 0.10); animation: pulse 1s ease-in-out infinite; }
+.component.slow { box-shadow: inset 0 0 0 1.5px var(--warning); }
+.component.recovered { box-shadow: inset 0 0 0 1.5px var(--good); }
+@keyframes pulse { 50% { box-shadow: inset 0 0 0 1.5px var(--warning), 0 0 0 4px rgba(250, 178, 25, 0.22); } }
+.fault-buttons { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.fault-buttons button { padding: 3px 9px; font-size: 12px; }
+.fault-buttons button:disabled { opacity: 0.45; cursor: default; }
+.log-glyph { display: inline-block; min-width: 1.2em; text-align: center; font-weight: 700; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; font-weight: 650; font-size: 12px;
+  background: var(--surface); box-shadow: 0 0 0 1px var(--border); white-space: nowrap; }
+.progress { height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; }
+.progress > div { height: 100%; background: var(--accent); transition: width 180ms linear; }
+.replay-row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin: 8px 0; }
+.replay-row label { display: inline-flex; gap: 6px; align-items: center; color: var(--ink-2); font-size: 12px; }
+.replay-row select { background: var(--surface); border: 0; box-shadow: 0 0 0 1px var(--border); border-radius: 6px; padding: 3px 6px; }
+.replay-row input[type="range"] { flex: 1 1 160px; accent-color: var(--accent); }
+.primary { background: var(--accent); color: #fff; border: 0; border-radius: 8px; padding: 6px 12px; cursor: pointer; font-weight: 600; }
+.primary:disabled { opacity: 0.5; cursor: default; }
+.banner { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 14px; border-radius: 12px;
+  background: var(--accent-wash); box-shadow: 0 0 0 1.5px var(--accent); }
+.banner strong { letter-spacing: 0.04em; }
+.verify { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--wash); }
+.verify .counts { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 6px 12px; margin-top: 8px; }
+.note-line { color: var(--ink-2); font-size: 12px; margin: 6px 0 0; }
+#diagram .node-box.fault { stroke: var(--critical); stroke-width: 2.5; }
+#diagram .node-box.working { stroke: var(--warning); stroke-width: 2.5; }
+#diagram .node-box.recovered { stroke: var(--good); stroke-width: 2; }
+@media (prefers-reduced-motion: reduce) { .component.working { animation: none; } .progress > div { transition: none; } }
+@media (max-width: 720px) { .component { grid-template-columns: 1fr; } .fault-buttons { justify-content: flex-start; } }
+
 /* Tooltip */
 #tooltip { position: fixed; z-index: 10; pointer-events: none; background: var(--surface); color: var(--ink);
   box-shadow: 0 0 0 1px var(--border), 0 6px 20px rgba(0, 0, 0, 0.14); border-radius: 8px; padding: 8px 10px;
@@ -166,17 +209,19 @@ footer p { margin: 4px 0; }
 <main>
   <header class="top">
     <div class="title">
-      <h1>Trading pipeline, live</h1>
+      <h1 id="page-title">Trading pipeline, live</h1>
       <p>Feed threads publish each instrument on its own topic. Every strategy runs on its own thread
-        with its own bounded mailbox, subscribed only to its topics, and every order goes through one
-        shared, rate-limited API gateway.</p>
+        with its own bounded mailbox, and every order goes through a pool of rate-limited API gateways.
+        Every event is journaled, a supervisor replaces workers that crash or hang and rebuilds their state
+        from the journal, and any recording can be replayed.</p>
     </div>
     <span class="pill" id="connection" role="status"><span class="icon" aria-hidden="true">&#9679;</span><span>Connecting</span></span>
+    <span class="pill" id="view-pill" hidden></span>
     <span class="pill num" id="uptime">uptime &mdash;</span>
     <button class="ghost" id="theme" type="button">Theme: auto</button>
   </header>
 
-  <section class="controls" aria-label="Simulation controls">
+  <section class="controls" id="live-controls" aria-label="Simulation controls">
     <div class="control">
       <label for="feed-rate">Feed rate (rounds/s per feed) <output id="feed-rate-out">&mdash;</output></label>
       <input id="feed-rate" type="range" min="0" max="9" step="1" value="4">
@@ -206,7 +251,34 @@ footer p { margin: 4px 0; }
     </div>
   </section>
 
+  <div class="banner" id="replay-banner" role="status" hidden></div>
+
   <section class="kpis" aria-label="Headline figures" id="kpis"></section>
+
+  <div class="grid-2" id="resilience-row">
+    <section class="card" aria-labelledby="resilience-title">
+      <header>
+        <h2 id="resilience-title">Resilience</h2>
+        <small id="resilience-sub">break something and watch the supervisor replace it</small>
+        <span class="spacer"></span>
+        <span class="muted num" id="resilience-summary"></span>
+      </header>
+      <div class="stack-list" id="components"></div>
+      <h3 class="subhead">API gateways</h3>
+      <div class="stack-list" id="gateway-list"></div>
+      <p class="note-line" id="gateway-note"></p>
+      <h3 class="subhead">Supervisor log</h3>
+      <div class="table-wrap" id="supervisor-log"></div>
+    </section>
+    <section class="card" aria-labelledby="journal-title">
+      <header>
+        <h2 id="journal-title">Journal &amp; replay</h2>
+        <small id="journal-sub">every event is recorded; any recording can be played back</small>
+      </header>
+      <div id="journal"></div>
+      <div id="replay-panel"></div>
+    </section>
+  </div>
 
   <section class="card" aria-labelledby="pipeline-title">
     <header>
@@ -239,7 +311,7 @@ footer p { margin: 4px 0; }
     </section>
     <div class="stack">
       <section class="card" aria-labelledby="limiter-title">
-        <header><h2 id="limiter-title">Shared API gateway</h2><small>one token, one sliding-window limit for every strategy</small></header>
+        <header><h2 id="limiter-title">Active API gateway</h2><small>the preferred gateway's token and sliding-window limit; the others stand by</small></header>
         <div id="limiter"></div>
       </section>
       <section class="card" aria-labelledby="latency-title">
@@ -264,6 +336,10 @@ footer p { margin: 4px 0; }
     <p>Try it: slow one strategy to 2 ms per event and watch only its mailbox fill and shed stale quotes while the
       others stay at zero; push the feed rate to max; raise broker latency or inject 429s and watch orders queue at
       the shared gateway instead of blocking any strategy.</p>
+    <p>Resilience: <em>crash</em> kills a worker thread; <em>hang</em> makes its handler block, so the supervisor sees work
+      waiting while nothing completes, abandons the thread, fences it and starts a replacement; <em>poison</em> makes every event
+      throw. Replacements replay the journal silently (no stale orders) before they go live, and the execution worker asks the
+      broker about every order it cannot account for before resending anything.</p>
     <p>Latency percentiles come from fixed-size histograms (within ~3%). Data streams from this process over
       Server-Sent Events; nothing leaves your machine.</p>
   </footer>
@@ -375,9 +451,29 @@ const state = {
   seenTape: new Set(),
   tapeSeeded: false,
   renderQueued: false,
+  view: null,
 };
 
+// Which components were restarted, and when, so a recovery stays visible for a few seconds.
+const recovery = { seen: new Map(), at: new Map() };
+const recentlyRecovered = (name) => performance.now() - (recovery.at.get(name) ?? -1e9) < 5000;
+
 function onSnapshot(data) {
+  if (state.view !== data.view) {
+    // A different system is being shown, so its series and tape start afresh.
+    state.view = data.view;
+    state.history = [];
+    state.seenTape.clear();
+    state.tapeSeeded = false;
+    state.initial = null;
+    recovery.seen.clear();
+    recovery.at.clear();
+  }
+  for (const component of data.resilience.components) {
+    const before = recovery.seen.get(component.name);
+    if (before !== undefined && component.restarts > before) recovery.at.set(component.name, performance.now());
+    recovery.seen.set(component.name, component.restarts);
+  }
   state.latest = data;
   if (!state.initial && data.feeds.length) {
     state.initial = {
@@ -403,6 +499,8 @@ function onSnapshot(data) {
     signalsTotal: sum(data.strategies, (strategy) => strategy.signals),
     fillsTotal: data.position_monitor.fills,
     acceptedTotal: data.api.accepted,
+    restarts: data.resilience.restarts,
+    journalRate: data.journal ? data.journal.rate : null,
   };
   // Signals, fills and orders arrive a few per second, so per-interval rates flicker
   // between zero and a spike; a rolling window reads better.
@@ -435,8 +533,11 @@ function render() {
   setConnection(state.connection === 'reconnecting' ? 'reconnecting' : data.running ? 'live' : 'stopped');
   $('uptime').textContent = `uptime ${fmt.uptime(data.uptime_s)}`;
   renderLegends(data);
+  renderView(data);
   renderKpis(data);
   syncControls(data);
+  renderResilience(data);
+  renderJournalReplay(data);
   pipeline.update(data);
   renderPrices(data);
   renderLimiter(data);
@@ -568,11 +669,29 @@ const KPIS = [
     sub: (d) => `${d.api.active} in flight · limit ${d.api.window_limit} per ${d.api.window_ms} ms`, series: (p) => p.pending },
   { id: 'fills', label: 'Fills',
     value: (d) => fmt.count(d.position_monitor.fills),
-    sub: (d) => `${fmt.count(d.position_monitor.rejections)} rejected · ${fmt.count(d.api.retries)} retries`, series: (p) => p.fills },
+    sub: (d) => `${fmt.count(d.position_monitor.rejections)} rejected · ${fmt.count(d.api.retries)} retries` +
+      (d.position_monitor.duplicates ? ` · ${fmt.count(d.position_monitor.duplicates)} duplicates ignored` : ''), series: (p) => p.fills },
   { id: 'e2e', label: 'Market data → position, p99',
     value: (d) => fmt.latency(latest(d.position_monitor.end_to_end).p99),
     sub: (d) => `p50 ${fmt.latency(latest(d.position_monitor.end_to_end).p50)} · includes gateway queueing`, series: (p) => p.e2e },
+  { id: 'recoveries', label: 'Recoveries',
+    value: (d) => fmt.count(d.resilience.restarts),
+    sub: (d) => d.resilience.supervised
+      ? `${fmt.count(d.resilience.faults)} faults · ${d.resilience.quarantines} quarantined · ${d.resilience.zombies} stuck threads`
+      : 'supervision is off', series: (p) => p.restarts },
+  { id: 'journal', label: 'Journal',
+    value: (d) => (d.replay ? fmt.count(d.replay.published) : d.journal ? fmt.count(d.journal.records) : '—'),
+    sub: (d) => (d.replay ? `replayed of ${fmt.count(d.replay.last - d.replay.first + 1)} records`
+      : d.journal ? `${fmtBytes(d.journal.bytes)} · ${fmt.rate(d.journal.rate)} · ${d.journal.gaps} gaps` : 'not recording'),
+    series: (p) => p.journalRate },
 ];
+
+function fmtBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
 
 // The most recent interval when it has samples, otherwise the cumulative figure.
 function latest(latency) { return latency.recent.count ? latency.recent : latency.all; }
@@ -772,12 +891,55 @@ function mailboxStatus(worker) {
   return 'normal';
 }
 
+const STATE_STYLE = {
+  healthy: { glyph: '●', color: 'var(--good)', label: 'healthy' },
+  degraded: { glyph: '⚠︎', color: 'var(--warning)', label: 'slow handler' },
+  stalled: { glyph: '◼', color: 'var(--serious)', label: 'stalled' },
+  crashed: { glyph: '✕', color: 'var(--critical)', label: 'crashed' },
+  restarting: { glyph: '↻', color: 'var(--accent)', label: 'restarting' },
+  quarantined: { glyph: '⛔', color: 'var(--critical)', label: 'quarantined' },
+};
+const BREAKER_STYLE = {
+  closed: { glyph: '●', color: 'var(--good)' },
+  open: { glyph: '✕', color: 'var(--critical)' },
+  'half-open': { glyph: '◐', color: 'var(--warning)' },
+};
+
+// Marks a diagram node with its component's health, and overrides one of its text lines
+// while the component is down or has just been replaced.
+function overlayHealth(node, component, key) {
+  const rect = node.rect.classList;
+  rect.remove('fault', 'working', 'recovered');
+  if (!component) return;
+  const style = STATE_STYLE[component.state] ?? STATE_STYLE.healthy;
+  const label = node.text[key];
+  if (component.state === 'restarting') {
+    rect.add('working');
+    label.textContent = `↻ restarting: rebuilding state (gen ${component.generation + 1})`;
+    label.style.fill = style.color;
+  } else if (component.state === 'healthy' || component.state === 'degraded') {
+    if (component.state === 'degraded') {
+      rect.add('working');
+      label.textContent = `⚠︎ ${component.last_cause || 'handler running long'}`;
+      label.style.fill = style.color;
+    } else if (component.restarts > 0 && recentlyRecovered(component.name)) {
+      rect.add('recovered');
+      label.textContent = `↻ gen ${component.generation} · back after ${Math.round(component.last_recovery_ms)} ms`;
+      label.style.fill = 'var(--good)';
+    }
+  } else {
+    rect.add('fault');
+    label.textContent = `${style.glyph} ${style.label}${component.state === 'quarantined' ? ': left down' : ''}`;
+    label.style.fill = style.color;
+  }
+}
+
 const pipeline = (() => {
   const W = 1320;
   const X = { feed: 85, topic: 322, strategy: 580, execution: 810, api: 1035, broker: 1245 };
   const SIZE = {
     feed: [150, 72], topic: [140, 40], strategy: [200, 106], execution: [170, 106],
-    api: [190, 134], broker: [120, 74], position: [190, 90], recorder: [190, 90],
+    api: [190, 156], broker: [120, 74], position: [190, 96], recorder: [190, 90], journal: [190, 90],
   };
   const TOP = 44;
   const svg = $('diagram');
@@ -805,7 +967,7 @@ const pipeline = (() => {
     const [width, height] = SIZE[kind];
     const node = { id, kind, cx, cy, width, height, left: cx - width / 2, right: cx + width / 2,
       top: cy - height / 2, bottom: cy + height / 2, text: {}, meters: {}, ...extra };
-    s('rect', { class: 'node-box', x: node.left, y: node.top, width, height, rx: 10 }, group);
+    node.rect = s('rect', { class: 'node-box', x: node.left, y: node.top, width, height, rx: 10 }, group);
     return node;
   }
 
@@ -865,7 +1027,7 @@ const pipeline = (() => {
     const headings = [
       [X.feed, 'FEEDS · one thread each'], [X.topic, 'EVENT BUS · a topic per instrument'],
       [X.strategy, 'STRATEGIES · own thread + mailbox'], [X.execution, 'EXECUTION'],
-      [X.api, 'SHARED API GATEWAY'], [X.broker, 'BROKER'],
+      [X.api, 'API GATEWAY POOL'], [X.broker, 'BROKER'],
     ];
     for (const [x, text] of headings) s('text', { x, y: 18, class: 'tiny', 'text-anchor': 'middle', text }, nodesGroup);
 
@@ -914,6 +1076,7 @@ const pipeline = (() => {
     meter(execution, nodesGroup, 'mailbox', 44);
     label(execution, nodesGroup, 'flow', 12, 68, 'small');
     label(execution, nodesGroup, 'orders', 12, 86, 'small');
+    label(execution, nodesGroup, 'status', 12, 100, 'tiny');
     nodes.set('execution', execution);
 
     const api = box(nodesGroup, 'api', 'api', X.api, centre);
@@ -924,6 +1087,8 @@ const pipeline = (() => {
     meter(api, nodesGroup, 'queue', 72);
     label(api, nodesGroup, 'flow', 12, 96, 'small');
     label(api, nodesGroup, 'status', 12, 114, 'small');
+    label(api, nodesGroup, 'gw1', 12, 132, 'tiny');
+    label(api, nodesGroup, 'gw2', 12, 145, 'tiny');
     nodes.set('api', api);
 
     const broker = box(nodesGroup, 'broker', 'broker', X.broker, centre);
@@ -937,6 +1102,7 @@ const pipeline = (() => {
     label(position, nodesGroup, 'mailbox', 12, 38, 'tiny');
     meter(position, nodesGroup, 'mailbox', 44);
     label(position, nodesGroup, 'fills', 12, 70, 'small');
+    label(position, nodesGroup, 'status', 12, 86, 'tiny');
     nodes.set('position', position);
 
     const recorder = box(nodesGroup, 'recorder', 'recorder', X.topic, bandY);
@@ -945,6 +1111,14 @@ const pipeline = (() => {
     meter(recorder, nodesGroup, 'mailbox', 44);
     label(recorder, nodesGroup, 'flow', 12, 70, 'small');
     nodes.set('recorder', recorder);
+
+    const journal = box(nodesGroup, 'journal', 'journal', X.strategy, bandY);
+    label(journal, nodesGroup, 'name', 12, 20, 'title', data.view === 'replay' ? 'Replay feed (journal reader)' : 'Journal writer');
+    label(journal, nodesGroup, 'mailbox', 12, 38, 'tiny');
+    meter(journal, nodesGroup, 'mailbox', 44);
+    label(journal, nodesGroup, 'flow', 12, 70, 'small');
+    label(journal, nodesGroup, 'status', 12, 84, 'tiny');
+    nodes.set('journal', journal);
 
     // Market-data routes come from the bus's own subscription table, so the diagram shows
     // what is actually wired rather than what the configuration intended.
@@ -968,23 +1142,28 @@ const pipeline = (() => {
     edges.set('api>broker', edge(edgesGroup, 'api>broker', [api.right, api.cy], [broker.left, broker.cy]));
     edges.set('api>position', edge(edgesGroup, 'api>position', [api.cx, api.bottom], [position.right - 40, position.top]));
     edges.set('bus>recorder', edge(edgesGroup, 'bus>recorder', [X.topic, busBottom], [recorder.cx, recorder.top]));
+    edges.set('bus>journal', edge(edgesGroup, 'bus>journal', [X.topic + 40, busBottom], [journal.cx - 40, journal.top]));
 
     layout = { key: topologyKey(data), nodes, edges, width: W, height };
     particles = [];
   }
 
   const topologyKey = (data) => JSON.stringify([data.feeds.map((f) => [f.name, f.symbols]),
-    data.strategies.map((x) => x.name), data.routes.length > 0]);
+    data.strategies.map((x) => x.name), data.routes.length > 0, data.view, data.gateways.members.length]);
 
   function update(data) {
     if (!layout || layout.key !== topologyKey(data)) build(data);
     const { nodes, edges } = layout;
     const prices = new Map((data.prices || []).map((price) => [price.symbol, price]));
 
+    const components = new Map(data.resilience.components.map((component) => [component.name, component]));
     for (const feed of data.feeds) {
       const node = nodes.get(`feed:${feed.name}`);
       node.text.rate.textContent = `${fmt.rate(feed.rate)} quotes`;
-      node.text.state.textContent = feed.paused ? '⏸ paused' : feed.finished ? '■ finished' : `● ${feedRateLabel(feed.interval_us)} rounds/s`;
+      node.text.state.textContent = data.view === 'replay' ? (feed.paused ? '⏸ paused' : feed.finished ? '■ replayed' : '⏵ replaying')
+        : feed.paused ? '⏸ paused' : feed.finished ? '■ finished' : `● ${feedRateLabel(feed.interval_us)} rounds/s`;
+      node.text.state.style.fill = '';
+      overlayHealth(node, components.get(feed.name), 'state');
       const perTopic = feed.paused ? 0 : feed.rate / Math.max(1, feed.symbols.length);
       for (const symbol of feed.symbols) {
         const topic = nodes.get(`topic:${symbol}`);
@@ -1000,20 +1179,26 @@ const pipeline = (() => {
       const node = nodes.get(`strategy:${strategy.name}`);
       const status = mailboxStatus(strategy);
       node.text.mailbox.textContent = `MAILBOX ${fmt.count(strategy.depth)} / ${fmt.count(strategy.capacity)} · drop oldest`;
-      setMeter(node, 'mailbox', strategy.depth / strategy.capacity, status);
+      setMeter(node, 'mailbox', strategy.depth / Math.max(1, strategy.capacity), status);
       node.text.flow.textContent = `${fmt.rate(strategy.rate)} in · busy ${fmt.pct(strategy.utilization)}`;
       node.text.signals.textContent = `${fmt.count(strategy.signals)} signals · ${fmt.count(strategy.evicted)} shed`;
       node.text.status.textContent = status === 'critical' ? `✕ shedding ${fmt.rate(strategy.drop_rate)} stale quotes`
         : status === 'warning' ? '⚠︎ mailbox filling' : strategy.work_us ? `slowed ${fmt.micros(strategy.work_us)}` : '';
       node.text.status.style.fill = status === 'normal' ? '' : STATUS[status].color;
+      overlayHealth(node, components.get(strategy.name), 'status');
     }
 
     const execution = nodes.get('execution');
     const exec = data.execution;
     execution.text.mailbox.textContent = `MAILBOX ${fmt.count(exec.depth)} / ${fmt.count(exec.capacity)} · reject new`;
-    setMeter(execution, 'mailbox', exec.depth / exec.capacity, mailboxStatus(exec));
+    setMeter(execution, 'mailbox', exec.depth / Math.max(1, exec.capacity), mailboxStatus(exec));
     execution.text.flow.textContent = `${fmt.count(exec.processed)} signals · busy ${fmt.pct(exec.utilization)}`;
     execution.text.orders.textContent = `${fmt.count(exec.submitted)} orders · ${fmt.count(exec.rejected_submissions)} refused`;
+    const reconciled = exec.recovery;
+    execution.text.status.textContent = reconciled.examined
+      ? `reconciled ${reconciled.examined}: ${reconciled.resubmitted} resent, ${reconciled.in_flight + reconciled.completed} already known` : '';
+    execution.text.status.style.fill = '';
+    overlayHealth(execution, components.get('order-execution'), 'status');
 
     const api = nodes.get('api');
     const gateway = data.api;
@@ -1027,6 +1212,15 @@ const pipeline = (() => {
     api.text.status.textContent = gateway.paused_ms > 0 ? `⚠︎ HTTP 429: paused ${gateway.paused_ms} ms`
       : gateway.pending > 0 && windowFraction >= 1 ? 'rate limit reached: orders wait' : `${fmt.count(gateway.rate_limited)} × 429 seen`;
     api.text.status.style.fill = gateway.paused_ms > 0 ? 'var(--warning)' : '';
+    const members = data.gateways.members;
+    ['gw1', 'gw2'].forEach((key, index) => {
+      const member = members[index];
+      const style = BREAKER_STYLE[member?.state] ?? BREAKER_STYLE.closed;
+      api.text[key].textContent = !member ? (members.length > 2 && index === 1 ? `+${members.length - 2} more` : '')
+        : `${member.name} ${style.glyph} ${member.down ? 'down' : member.state}${member.preferred ? ' ★' : ''}`;
+      api.text[key].style.fill = member && (member.state !== 'closed' || member.down) ? style.color : '';
+    });
+    api.rect.classList.toggle('fault', members.length > 0 && members.every((member) => member.state !== 'closed'));
 
     const broker = nodes.get('broker');
     broker.text.latency.textContent = `mock · ${gateway.mock_latency_ms} ms`;
@@ -1035,16 +1229,43 @@ const pipeline = (() => {
     const position = nodes.get('position');
     const monitor = data.position_monitor;
     position.text.mailbox.textContent = `MAILBOX ${fmt.count(monitor.depth)} / ${fmt.count(monitor.capacity)}`;
-    setMeter(position, 'mailbox', monitor.depth / monitor.capacity, mailboxStatus(monitor));
+    setMeter(position, 'mailbox', monitor.depth / Math.max(1, monitor.capacity), mailboxStatus(monitor));
     position.text.fills.textContent = `${fmt.count(monitor.fills)} fills · ${fmt.count(monitor.rejections)} rejected`;
+    position.text.status.textContent = monitor.duplicates ? `${fmt.count(monitor.duplicates)} duplicate fills ignored` : '';
+    position.text.status.style.fill = '';
+    overlayHealth(position, components.get('position-monitor'), 'status');
 
     const recorder = nodes.get('recorder');
     if (data.recorder) {
       const tap = data.recorder;
       recorder.text.mailbox.textContent = `MAILBOX ${fmt.count(tap.depth)} / ${fmt.count(tap.capacity)} · every event`;
-      setMeter(recorder, 'mailbox', tap.depth / tap.capacity, mailboxStatus(tap));
+      setMeter(recorder, 'mailbox', tap.depth / Math.max(1, tap.capacity), mailboxStatus(tap));
       recorder.text.flow.textContent = `${fmt.rate(tap.rate)} · ${fmt.count(tap.evicted)} shed`;
       edges.get('bus>recorder').rate = tap.rate;
+    }
+    const journalNode = nodes.get('journal');
+    if (data.journal) {
+      const tap = data.journal;
+      const fill = tap.tap_depth / Math.max(1, tap.tap_capacity);
+      journalNode.text.mailbox.textContent = `TAP QUEUE ${fmt.count(tap.tap_depth)} / ${fmt.count(tap.tap_capacity)} · reject new`;
+      setMeter(journalNode, 'mailbox', fill, tap.tap_rejected > 0 || fill >= 0.9 ? 'critical' : fill >= 0.5 ? 'warning' : 'normal');
+      journalNode.text.flow.textContent = `${fmt.rate(tap.rate)} · ${fmtBytes(tap.bytes)}`;
+      journalNode.text.status.textContent = tap.gaps ? `✕ ${fmt.count(tap.gap_events)} events lost (gaps marked)` : `${tap.segments} segment${tap.segments === 1 ? '' : 's'} · ${fmt.count(tap.fsyncs)} syncs`;
+      journalNode.text.status.style.fill = tap.gaps ? 'var(--critical)' : '';
+      edges.get('bus>journal').rate = tap.rate;
+    } else if (data.replay) {
+      const r = data.replay;
+      journalNode.text.mailbox.textContent = `RECORD ${fmt.count(r.current)} / ${fmt.count(r.last)}`;
+      setMeter(journalNode, 'mailbox', r.progress, 'normal');
+      journalNode.text.flow.textContent = `${fmt.count(r.published)} published`;
+      journalNode.text.status.textContent = `${r.state} · ${r.pacing === 'lockstep' ? 'lockstep' : `${r.speed}×`}`;
+      journalNode.text.status.style.fill = '';
+      edges.get('bus>journal').rate = 0;
+    } else {
+      journalNode.text.mailbox.textContent = 'no journal';
+      setMeter(journalNode, 'mailbox', 0, 'normal');
+      journalNode.text.flow.textContent = '';
+      journalNode.text.status.textContent = '';
     }
     if (!data.running) for (const e of edges.values()) e.rate = 0;
   }
@@ -1064,6 +1285,7 @@ const pipeline = (() => {
     tape.forEach((entry, index) => {
       if (state.seenTape.has(keys[index])) return;
       state.seenTape.add(keys[index]);
+      if (entry.kind === 'supervision') return;
       const color = colorValue(entry.strategy);
       const route = entry.kind === 'signal' ? [[`${entry.strategy}>execution`, 1], ['execution>api', 1]]
         : entry.kind === 'fill' ? [['api>broker', 1], ['api>broker', -1], ['api>position', 1]]
@@ -1460,6 +1682,7 @@ const TAPE_KIND = {
   signal: { icon: '◆', color: 'var(--ink-2)', label: 'signal' },
   fill: { icon: '●', color: 'var(--good)', label: 'fill' },
   rejection: { icon: '✕', color: 'var(--critical)', label: 'rejected' },
+  supervision: { icon: '↻', color: 'var(--accent)', label: 'supervisor' },
 };
 
 function strategyCell(name) {
@@ -1479,11 +1702,11 @@ function renderTape(data) {
       h('td', { class: 'r muted', text: `${Math.max(0, data.uptime_s - entry.t).toFixed(1)} s` }),
       h('td', {}, h('span', { class: 'status-icon', style: `color:${kind.color}`, text: kind.icon }), document.createTextNode(` ${kind.label}`)),
       strategyCell(entry.strategy),
-      h('td', { text: entry.symbol }),
-      h('td', { text: `${entry.side === 'BUY' ? '▲' : '▼'} ${entry.side}` }),
-      h('td', { class: 'r', text: fmt.count(entry.qty) }),
+      h('td', { text: entry.symbol || '—' }),
+      h('td', { text: entry.kind === 'supervision' ? '—' : `${entry.side === 'BUY' ? '▲' : '▼'} ${entry.side}` }),
+      h('td', { class: 'r', text: entry.kind === 'supervision' ? '—' : fmt.count(entry.qty) }),
       h('td', { class: 'r', text: entry.price ? fmt.price(entry.price) : '—' }),
-      h('td', { class: 'r', text: fmt.latency(entry.latency_ms * 1000) }),
+      h('td', { class: 'r', text: entry.kind === 'supervision' ? (entry.latency_ms ? `${entry.latency_ms.toFixed(1)} ms` : '—') : fmt.latency(entry.latency_ms * 1000) }),
       h('td', { class: 'muted', text: entry.detail })));
   }
   $('tape').replaceChildren(h('table', {}, h('thead', {}, h('tr', {},
@@ -1506,6 +1729,372 @@ function renderPositions(data) {
   }
   $('positions').replaceChildren(h('table', {}, h('thead', {}, h('tr', {},
     ...['Strategy', 'Symbol', 'Position', 'Fills', 'P&L'].map((text, index) => h('th', { class: index >= 2 ? 'r' : '', text })))), body));
+}
+
+// ---------------------------------------------------------------- live or replay view
+function renderView(data) {
+  const replay = data.view === 'replay';
+  const pill = $('view-pill');
+  pill.hidden = false;
+  pill.replaceChildren(
+    h('span', { class: 'icon', 'aria-hidden': 'true', style: `color:${replay ? 'var(--accent)' : 'var(--good)'}`, text: replay ? '⏵' : '●' }),
+    h('span', { text: replay ? 'Showing a replay' : 'Showing the live system' }));
+  $('page-title').textContent = replay ? 'Trading pipeline, replay' : 'Trading pipeline, live';
+  document.title = replay ? 'Replay · Pipeline Monitor' : 'Pipeline Monitor';
+  $('live-controls').hidden = replay;
+  $('resilience-sub').textContent = replay ? 'read-only while a replay is shown'
+    : data.resilience.supervised ? 'break something and watch the supervisor replace it' : 'supervision is off; start with --supervise';
+
+  const banner = $('replay-banner');
+  if (!replay || !data.replay) { banner.hidden = true; return; }
+  if (!banner.dataset.built) {
+    banner.dataset.built = '1';
+    const back = h('button', { class: 'ghost', type: 'button', id: 'banner-live', text: 'Back to live' });
+    back.addEventListener('click', () => sendControl('view.show', 'live'));
+    banner.append(h('strong', { text: 'REPLAY' }), h('span', { id: 'banner-text' }), h('span', { class: 'chip', id: 'banner-verdict' }), back);
+  }
+  banner.hidden = false;
+  const r = data.replay;
+  $('banner-text').textContent = `session ${data.session.replace(/^replay-/, '')} · ${MODE_LABEL[r.mode]} · ${r.state} · ${Math.round(r.progress * 100)}%`;
+  paintVerdict($('banner-verdict'), r.verification);
+  $('banner-live').hidden = !data.live_available;
+}
+
+const MODE_LABEL = { rederive: 're-derive', playback: 'playback' };
+
+const VERDICTS = {
+  match: { glyph: '✓', color: 'var(--good)', label: 'matches the recording' },
+  explained: { glyph: '≈', color: 'var(--good)', label: 'differs only where a restart skipped signals' },
+  diverged: { glyph: '✕', color: 'var(--critical)', label: 'diverges from the recording' },
+  running: { glyph: '…', color: 'var(--accent)', label: 'comparing' },
+  'not-comparable': { glyph: '–', color: 'var(--muted)', label: 'not comparable' },
+};
+
+const sentence = (text) => (/[.!?]$/.test(text) ? text : `${text}.`);
+
+function paintVerdict(node, verification) {
+  if (!verification || !verification.enabled) { node.hidden = true; return; }
+  const style = VERDICTS[verification.verdict] ?? VERDICTS.running;
+  node.hidden = false;
+  node.replaceChildren(h('span', { 'aria-hidden': 'true', style: `color:${style.color}`, text: style.glyph }), h('span', { text: style.label }));
+}
+
+// ---------------------------------------------------------------- resilience
+const FAULT_LABEL = { crash: 'Crash', hang: 'Hang 8 s', poison: 'Poison' };
+const FAULT_HELP = {
+  crash: 'Kill the worker thread. The supervisor sees it die and starts a replacement.',
+  hang: 'Make the handler block, as a deadlock would. Work piles up while nothing completes; the supervisor abandons the stuck thread, fences it and starts a replacement. The old thread wakes up after 8 s and finds it can no longer write.',
+  poison: 'Make every event throw until the worker is replaced.',
+};
+const FAULTS_FOR = { strategy: ['crash', 'hang', 'poison'], execution: ['crash', 'hang', 'poison'],
+  'position-monitor': ['crash', 'hang', 'poison'], feed: ['crash'] };
+const LOG_STYLE = {
+  fault: { glyph: '✕', color: 'var(--critical)', label: 'fault detected' },
+  restarted: { glyph: '↻', color: 'var(--good)', label: 'replaced' },
+  quarantined: { glyph: '⛔', color: 'var(--critical)', label: 'quarantined' },
+  'recovery-failed': { glyph: '✕', color: 'var(--critical)', label: 'recovery failed' },
+};
+
+async function inject(name, kind, button) {
+  button.disabled = true;
+  setTimeout(() => { button.disabled = false; }, 900);
+  await sendControl(`fault.${kind}:${name}`, kind === 'hang' ? 8000 : 1);
+}
+
+function buildComponentRow(component, interactive) {
+  const row = h('div', { class: 'component', 'data-name': component.name });
+  const buttons = h('div', { class: 'fault-buttons' });
+  if (interactive) {
+    for (const kind of FAULTS_FOR[component.kind] ?? []) {
+      const button = h('button', { class: 'ghost', type: 'button', title: FAULT_HELP[kind], text: FAULT_LABEL[kind] });
+      button.addEventListener('click', () => inject(component.name, kind, button));
+      buttons.append(button);
+    }
+  }
+  row.append(
+    h('div', { class: 'who' }, h('strong', { text: component.name }), h('small', { class: 'kind' })),
+    h('div', {}, h('span', { class: 'state' }, h('span', { class: 'glyph', 'aria-hidden': 'true' }), h('span', { class: 'label' })),
+      h('span', { class: 'meta' })),
+    buttons,
+    h('div', { class: 'detail' }));
+  return row;
+}
+
+const KIND_LABEL = { feed: 'feed thread', strategy: 'strategy thread', execution: 'order execution thread',
+  'position-monitor': 'position monitor thread' };
+
+function updateComponentRow(row, component) {
+  const style = STATE_STYLE[component.state] ?? STATE_STYLE.healthy;
+  row.querySelector('.kind').textContent = KIND_LABEL[component.kind] ?? component.kind;
+  const glyph = row.querySelector('.glyph');
+  glyph.textContent = style.glyph;
+  glyph.parentNode.style.color = style.color;
+  row.querySelector('.label').textContent = style.label;
+  row.querySelector('.meta').textContent =
+    `generation ${component.generation} · ${component.restarts} restart${component.restarts === 1 ? '' : 's'}`;
+
+  const down = component.state !== 'healthy' && component.state !== 'degraded';
+  const recovered = component.state === 'healthy' && component.restarts > 0 && recentlyRecovered(component.name);
+  row.classList.toggle('fault', down && component.state !== 'restarting');
+  row.classList.toggle('working', component.state === 'restarting');
+  row.classList.toggle('slow', component.state === 'degraded');
+  row.classList.toggle('recovered', recovered);
+
+  const detail = row.querySelector('.detail');
+  let text;
+  if (down) {
+    text = `${component.last_cause || 'failed'}${component.last_error ? ` (${component.last_error})` : ''}`;
+    if (component.down_for_ms) text += ` — down for ${Math.round(component.down_for_ms)} ms`;
+    if (component.state === 'quarantined') text = `${component.last_cause} — ${component.detail}`;
+  } else if (component.state === 'degraded') {
+    text = component.last_cause;
+  } else if (component.restarts > 0) {
+    text = `Last recovery ${Math.round(component.last_recovery_ms)} ms` +
+      (component.last_detect_ms ? ` after ${Math.round(component.last_detect_ms)} ms of stall` : '') +
+      `: ${component.detail}`;
+    if (component.fenced_writes) text += ` · ${fmt.count(component.fenced_writes)} write${component.fenced_writes === 1 ? '' : 's'} by the stale instance blocked`;
+    if (component.dead_letters) text += ` · ${component.dead_letters} poison event${component.dead_letters === 1 ? '' : 's'} dead-lettered`;
+  } else {
+    text = 'No faults so far.';
+  }
+  detail.textContent = text;
+  detail.style.color = down && component.state !== 'restarting' ? style.color : '';
+}
+
+function renderResilience(data) {
+  const resilience = data.resilience;
+  const interactive = data.view === 'live' && resilience.supervised;
+  $('resilience-summary').textContent = resilience.supervised
+    ? `${resilience.faults} fault${resilience.faults === 1 ? '' : 's'} · ${resilience.restarts} restart${resilience.restarts === 1 ? '' : 's'}` +
+      (resilience.zombies ? ` · ${resilience.zombies} stuck thread${resilience.zombies === 1 ? '' : 's'}` : '')
+    : 'not supervised';
+
+  const root = $('components');
+  const key = resilience.components.map((component) => `${component.name}:${component.kind}`).join('|') + interactive;
+  if (root.dataset.key !== key) {
+    root.dataset.key = key;
+    root.replaceChildren(...resilience.components.map((component) => buildComponentRow(component, interactive)));
+  }
+  for (const component of resilience.components) {
+    updateComponentRow(root.querySelector(`[data-name="${CSS.escape(component.name)}"]`), component);
+  }
+
+  renderGateways(data, interactive);
+  renderSupervisorLog(data);
+}
+
+function renderGateways(data, interactive) {
+  const members = data.gateways.members;
+  const root = $('gateway-list');
+  const key = members.map((member) => member.name).join('|') + interactive;
+  if (root.dataset.key !== key) {
+    root.dataset.key = key;
+    root.replaceChildren(...members.map((member, index) => {
+      const button = h('button', { class: 'ghost', type: 'button', 'aria-pressed': 'false',
+        title: 'Make this gateway\'s connection fail. Requests move to another gateway with the same idempotency key.' });
+      button.addEventListener('click', () => {
+        const down = button.getAttribute('aria-pressed') !== 'true';
+        button.disabled = true;
+        setTimeout(() => { button.disabled = false; }, 600);
+        sendControl(`fault.gateway:${index}`, down ? 1 : 0);
+      });
+      const buttons = h('div', { class: 'fault-buttons' });
+      if (interactive) buttons.append(button);
+      return h('div', { class: 'component', 'data-gateway': member.name },
+        h('div', { class: 'who' }, h('strong', { text: member.name }), h('small', { class: 'kind' })),
+        h('div', {}, h('span', { class: 'state' }, h('span', { class: 'glyph', 'aria-hidden': 'true' }), h('span', { class: 'label' })),
+          h('span', { class: 'meta' })),
+        buttons, h('div', { class: 'detail' }));
+    }));
+  }
+  for (const member of members) {
+    const row = root.querySelector(`[data-gateway="${CSS.escape(member.name)}"]`);
+    const style = BREAKER_STYLE[member.state] ?? BREAKER_STYLE.closed;
+    row.querySelector('.kind').textContent = member.preferred ? 'takes new orders' : member.state === 'closed' ? 'standing by' : 'out of rotation';
+    const glyph = row.querySelector('.glyph');
+    glyph.textContent = style.glyph;
+    glyph.parentNode.style.color = style.color;
+    row.querySelector('.label').textContent = `circuit ${member.state}${member.down ? ' · connection down' : ''}`;
+    row.querySelector('.meta').textContent =
+      `${fmt.count(member.submitted)} sent · ${fmt.count(member.failed)} failed · ${member.ejections} ejection${member.ejections === 1 ? '' : 's'}`;
+    row.classList.toggle('fault', member.state === 'open');
+    row.classList.toggle('slow', member.state === 'half-open');
+    const detail = row.querySelector('.detail');
+    detail.textContent = member.state === 'open' ? `ejected: back on probation in ${member.reopens_in_ms} ms`
+      : member.state === 'half-open' ? 'on probation: one probe request at a time until it succeeds twice'
+      : member.consecutive_failures ? `${member.consecutive_failures} consecutive failure${member.consecutive_failures === 1 ? '' : 's'}`
+      : member.pending || member.active ? `${member.active} in flight · ${member.pending} waiting` : '';
+    const button = row.querySelector('button');
+    if (button) {
+      button.setAttribute('aria-pressed', String(member.down));
+      button.textContent = member.down ? 'Bring up' : 'Take down';
+    }
+  }
+  const pool = data.gateways;
+  $('gateway-note').textContent = `Orders use the first healthy gateway (one credential's limit at a time). ` +
+    `${pool.reroutes} request${pool.reroutes === 1 ? '' : 's'} re-routed after a hard failure; HTTP 429 slows a gateway down but never fails it over. ` +
+    `A failed gateway is never the last one ejected.`;
+}
+
+function renderSupervisorLog(data) {
+  const entries = data.resilience.log.slice(-10).reverse();
+  const root = $('supervisor-log');
+  if (!entries.length) {
+    root.replaceChildren(h('p', { class: 'muted', text: data.view === 'replay'
+      ? 'A replay is not supervised. Restarts that happened in the recording appear on the tape.'
+      : data.resilience.supervised ? 'Nothing yet. Use the buttons above to crash or hang a worker.' : 'Supervision is off.' }));
+    return;
+  }
+  const body = h('tbody');
+  for (const entry of entries) {
+    const style = LOG_STYLE[entry.action] ?? LOG_STYLE.fault;
+    body.append(h('tr', {},
+      h('td', { class: 'r muted', text: `${Math.max(0, data.uptime_s - entry.t).toFixed(1)} s ago` }),
+      h('td', {}, h('span', { class: 'log-glyph', style: `color:${style.color}`, 'aria-hidden': 'true', text: style.glyph }),
+        document.createTextNode(` ${entry.component}`)),
+      h('td', { text: entry.action === 'restarted' ? `${style.label} (gen ${entry.generation}, ${Math.round(entry.recovery_ms)} ms)` : style.label }),
+      h('td', { class: 'muted', style: 'white-space:normal', text: entry.detail })));
+  }
+  root.replaceChildren(h('table', {}, h('thead', {}, h('tr', {},
+    ...['When', 'Component', 'Event', 'Detail'].map((text, index) => h('th', { class: index === 0 ? 'r' : '', text })))), body));
+}
+
+// ---------------------------------------------------------------- journal and replay
+const SPEEDS = [['0.25', '0.25×'], ['0.5', '0.5×'], ['1', '1× recorded pace'], ['2', '2×'], ['5', '5×'], ['10', '10×'], ['max', 'max (lockstep)']];
+
+function speedOptions(selected) {
+  return SPEEDS.map(([value, text]) => h('option', { value, text, ...(value === selected ? { selected: 'selected' } : {}) }));
+}
+
+function buildReplayPanel() {
+  const root = $('replay-panel');
+  root.dataset.built = '1';
+
+  const mode = h('select', { id: 'replay-mode', 'aria-label': 'Replay mode' },
+    h('option', { value: 'rederive', text: 'Re-derive: strategies decide again' }),
+    h('option', { value: 'playback', text: 'Playback: show what happened' }));
+  const speed = h('select', { id: 'replay-speed', 'aria-label': 'Replay speed' }, ...speedOptions('max'));
+  const start = h('button', { class: 'primary', type: 'button', id: 'replay-start', text: 'Watch a replay' });
+  start.addEventListener('click', () => sendControl(`replay.start:${mode.value}`, speed.value));
+  const starter = h('div', { id: 'replay-starter' },
+    h('h3', { class: 'subhead', text: 'Replay this session' }),
+    h('div', { class: 'replay-row' }, h('label', {}, 'Mode ', mode), h('label', {}, 'Speed ', speed), start),
+    h('p', { class: 'note-line', id: 'replay-help',
+      text: 'Re-derive publishes the recorded quotes through the live strategies against a mock broker and checks the signals against what was recorded. ' +
+        'Max runs in lockstep with the consumers, so no quote is ever shed.' }));
+
+  const background = h('div', { id: 'replay-background', hidden: 'hidden' },
+    h('h3', { class: 'subhead', text: 'A replay is running beside the live system' }),
+    h('p', { class: 'note-line', id: 'replay-background-text' }),
+    h('div', { class: 'replay-row' },
+      (() => { const b = h('button', { class: 'primary', type: 'button', text: 'Show replay' }); b.addEventListener('click', () => sendControl('view.show', 'replay')); return b; })(),
+      (() => { const b = h('button', { class: 'ghost', type: 'button', text: 'Stop replay' }); b.addEventListener('click', () => sendControl('replay.stop', 1)); return b; })()));
+
+  const pause = h('button', { class: 'ghost', type: 'button', id: 'replay-pause', text: '⏸ Pause' });
+  pause.addEventListener('click', () => sendControl('replay.pause', pause.dataset.paused === '1' ? 0 : 1));
+  const runSpeed = h('select', { id: 'replay-run-speed', 'aria-label': 'Replay speed' }, ...speedOptions('1'));
+  runSpeed.addEventListener('change', () => { touched.set('replay-speed', performance.now()); sendControl('replay.speed', runSpeed.value); });
+  const seek = h('input', { type: 'range', min: '0', max: '1000', value: '0', id: 'replay-seek', 'aria-label': 'Position in the recording' });
+  const sendSeek = throttled((value) => sendControl('replay.seek', value));
+  seek.addEventListener('input', () => { touched.set('replay-seek', performance.now()); sendSeek(seek.value); });
+  const stop = h('button', { class: 'ghost', type: 'button', id: 'replay-stop', text: 'Stop replay' });
+  stop.addEventListener('click', () => sendControl('replay.stop', 1));
+
+  const run = h('div', { id: 'replay-run', hidden: 'hidden' },
+    h('h3', { class: 'subhead', text: 'Replay' }),
+    h('div', { class: 'replay-row' }, h('span', { class: 'chip', id: 'replay-state' }), h('span', { class: 'muted num', id: 'replay-position' })),
+    h('div', { class: 'progress', role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100', id: 'replay-bar' }, h('div', { id: 'replay-fill' })),
+    h('div', { class: 'replay-row' }, pause, h('label', {}, 'Speed ', runSpeed), h('label', {}, 'Position ', seek), stop),
+    h('p', { class: 'note-line', id: 'replay-fidelity' }),
+    h('div', { class: 'verify', id: 'replay-verify' }));
+
+  root.append(starter, background, run);
+}
+
+function renderJournalReplay(data) {
+  // Journal statistics.
+  const journal = $('journal');
+  if (data.journal) {
+    const j = data.journal;
+    const stats = [
+      ['Records', fmt.count(j.records)], ['Rate', fmt.rate(j.rate)], ['Size', fmtBytes(j.bytes)], ['Segments', String(j.segments)],
+      ['Synced', `${fmt.count(j.fsyncs)}×`], ['Tap queue', `${fmt.count(j.tap_depth)} / ${fmt.count(j.tap_capacity)}`],
+      ['Gaps', j.gaps ? `${j.gaps} (${fmt.count(j.gap_events)} lost)` : 'none'], ['Repaired', j.repaired_bytes ? fmtBytes(j.repaired_bytes) : '—'],
+    ];
+    journal.replaceChildren(
+      h('div', { class: 'stats' }, ...stats.map(([k, v]) => h('div', { class: 'stat' }, h('div', { class: 'k', text: k }), h('div', { class: 'v', text: v })))),
+      h('p', { class: 'note-line', text: `Session ${j.session}, written to ${j.directory}. Quotes are stored by topic name with wall-clock times, each record checksummed; ` +
+        'a torn last record after a crash is truncated on reopening, and a damaged segment is set aside, never silently trimmed.' }));
+  } else if (data.replay) {
+    journal.replaceChildren(h('p', { class: 'note-line', text: `Reading session ${data.session.replace(/^replay-/, '')}: records ${fmt.count(data.replay.first)} to ${fmt.count(data.replay.last)}.` }));
+  } else {
+    journal.replaceChildren(h('p', { class: 'muted', text: 'Not recording. Start with --journal DIR (on by default with --dashboard).' }));
+  }
+
+  // Replay controls.
+  const root = $('replay-panel');
+  if (!root.dataset.built) buildReplayPanel();
+  const viewing = data.view === 'replay' && data.replay;
+  const background = data.view === 'live' && data.other_replay;
+  $('replay-starter').hidden = viewing || background || data.view === 'replay';
+  $('replay-start').disabled = !data.can_replay;
+  $('replay-help').textContent = data.can_replay
+    ? 'Re-derive publishes the recorded quotes through the live strategies against a mock broker and checks the signals against what was recorded. Max runs in lockstep with the consumers, so no quote is ever shed.'
+    : 'Replay needs a journal. Start with --journal DIR.';
+  $('replay-background').hidden = !background;
+  if (background) {
+    const r = data.other_replay;
+    $('replay-background-text').textContent = `${r.state} · ${Math.round(r.progress * 100)}% · ${MODE_LABEL[r.mode]}` +
+      (r.verification.enabled ? ` · ${(VERDICTS[r.verification.verdict] ?? VERDICTS.running).label}` : '');
+  }
+  $('replay-run').hidden = !viewing;
+  if (!viewing) return;
+
+  const r = data.replay;
+  const state = { running: ['⏵', 'var(--accent)', 'replaying'], paused: ['⏸', 'var(--warning)', 'paused'],
+    finished: ['■', 'var(--good)', 'finished'], failed: ['✕', 'var(--critical)', 'failed'], idle: ['○', 'var(--muted)', 'starting'] }[r.state];
+  $('replay-state').replaceChildren(h('span', { style: `color:${state[1]}`, 'aria-hidden': 'true', text: state[0] }), h('span', { text: state[2] }));
+  $('replay-position').textContent = `record ${fmt.count(r.current)} of ${fmt.count(r.last)} · ${r.position_s.toFixed(1)} s of ${r.span_s.toFixed(1)} s recorded · ` +
+    `${fmt.count(r.published)} published · ${r.pacing === 'lockstep' ? 'lockstep' : `${r.speed}× pace`} · ${r.elapsed_s.toFixed(1)} s elapsed`;
+  $('replay-fill').style.width = `${r.progress * 100}%`;
+  $('replay-bar').setAttribute('aria-valuenow', String(Math.round(r.progress * 100)));
+  const pause = $('replay-pause');
+  pause.dataset.paused = r.state === 'paused' ? '1' : '0';
+  pause.textContent = r.state === 'paused' ? '⏵ Resume' : '⏸ Pause';
+  pause.disabled = r.state === 'finished' || r.state === 'failed';
+  if (!recentlyTouched('replay-speed')) $('replay-run-speed').value = r.pacing === 'lockstep' ? 'max' : String(r.speed);
+  if (!recentlyTouched('replay-seek')) $('replay-seek').value = String(Math.round(r.progress * 1000));
+  $('replay-stop').hidden = !data.live_available;
+
+  const shed = sum(data.strategies, (strategy) => strategy.evicted);
+  const notes = [];
+  if (r.mode === 'rederive') {
+    notes.push(shed === 0 ? 'Fidelity: no quote has been shed, so every strategy saw the whole recording.'
+      : `Fidelity: ${fmt.count(shed)} quotes were shed by slow consumers, so a strategy may decide differently from the recording. Use max (lockstep) to avoid that.`);
+  } else {
+    notes.push('Playback: nothing is recomputed. No strategies run and no orders are sent; recorded fills rebuild the positions.');
+  }
+  if (r.gaps) notes.push(`The journal has ${r.gaps} gap${r.gaps === 1 ? '' : 's'}: ${fmt.count(r.gap_events)} events were lost while it was being recorded.`);
+  if (r.seeked) notes.push('The replay was moved, so the strategies started cold part-way through and cannot be compared with the recording.');
+  if (r.error) notes.push(`Error: ${r.error}`);
+  $('replay-fidelity').textContent = notes.join(' ');
+
+  const verify = $('replay-verify');
+  const v = r.verification;
+  verify.hidden = !v.enabled;
+  if (v.enabled) {
+    const style = VERDICTS[v.verdict] ?? VERDICTS.running;
+    const pending = Math.max(0, v.recorded - v.matched);
+    const restartedStrategies = v.outages.filter((name) => data.strategies.some((strategy) => strategy.name === name));
+    const counts = [['Recorded signals', v.recorded], ['Re-derived', v.rederived], ['Matched', v.matched],
+      [v.complete ? 'Missing' : 'Not yet seen', v.complete ? v.missing : pending], ['Extra', v.extra], ['Explained by restarts', v.explained]];
+    verify.replaceChildren(
+      h('div', { class: 'replay-row', style: 'margin:0' }, h('strong', { text: 'Verification against the recording' }),
+        h('span', { class: 'chip', style: `color:${style.color}` }, h('span', { 'aria-hidden': 'true', text: style.glyph }), h('span', { text: style.label }))),
+      h('div', { class: 'counts' }, ...counts.map(([k, n]) => h('div', { class: 'stat' }, h('div', { class: 'k', text: k }), h('div', { class: 'v', text: fmt.count(n) })))),
+      h('p', { class: 'note-line', text: sentence(v.note || 'A signal is identified by strategy, symbol, the sequence of the quote that caused it, and side: the same identity its order id is built from') +
+        (restartedStrategies.length ? ` Strategies restarted during the recording: ${restartedStrategies.join(', ')}.` : '') }));
+  }
 }
 
 // ---------------------------------------------------------------- start

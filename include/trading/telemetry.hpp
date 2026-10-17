@@ -49,12 +49,24 @@ private:
     bool after_key_{false};
 };
 
+// What the dashboard needs to know beyond one system's own snapshot.
+struct ViewInfo {
+    // Which system the snapshot is of: "live" or "replay".
+    std::string view{"live"};
+    // Whether a journal exists that a replay could read.
+    bool can_replay{false};
+    // Whether a live system is running behind a replay view, so the page can offer "back to live".
+    bool live_available{false};
+    // A replay running beside the live system, summarised while the live view is shown.
+    std::optional<ReplaySnapshot> other_replay{};
+};
+
 // Renders system snapshots as the dashboard's JSON document. It keeps the previous
 // snapshot so it can add per-second rates and latency percentiles for the last interval
 // alongside cumulative totals. Not thread-safe: call it from one thread.
 class TelemetryRenderer {
 public:
-    [[nodiscard]] std::string render(const SystemSnapshot& snapshot);
+    [[nodiscard]] std::string render(const SystemSnapshot& snapshot, const ViewInfo& view = {});
 
 private:
     std::optional<SystemSnapshot> previous_;
