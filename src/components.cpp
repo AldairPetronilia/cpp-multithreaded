@@ -121,7 +121,7 @@ std::string milliseconds_text(double ms) {
 
 }  // namespace
 
-void reapply_recent_reports(JournalWriter& journal, PositionBook& book) {
+RecoveredReports reapply_recent_reports(JournalWriter& journal, PositionBook& book) {
     sync_for_recovery(journal);
     JournalReader reader(journal.directory());
     const auto stamp = MonotonicClock::now();
@@ -140,9 +140,21 @@ void reapply_recent_reports(JournalWriter& journal, PositionBook& book) {
         }
     }
     check_readable(reader);
+    RecoveredReports recovered;
     for (const auto& report : recent) {
-        book.apply(report);
+        switch (book.apply(report)) {
+            case ApplyResult::applied:
+                ++recovered.fills;
+                break;
+            case ApplyResult::not_filled:
+                ++recovered.rejections;
+                break;
+            case ApplyResult::duplicate:
+                ++recovered.already_applied;
+                break;
+        }
     }
+    return recovered;
 }
 
 // --- StrategyComponent ---------------------------------------------------------------------
@@ -451,7 +463,7 @@ std::shared_ptr<PositionMonitor> PositionComponent::build(std::uint64_t generati
         built->set_crash_hook([doorbell = context_.doorbell] { doorbell->ring(); });
     }
     if (recover && context_.journal != nullptr) {
-        built->set_recovery([journal = context_.journal, &book = book_] { reapply_recent_reports(*journal, book); });
+        built->set_recovery([journal = context_.journal, &book = book_] { return reapply_recent_reports(*journal, book); });
     }
     return built;
 }
@@ -514,8 +526,6 @@ RecoveryResult PositionComponent::recover(const std::string& cause) {
     // A hung monitor may wake up holding a report; the gate keeps it away from the book, and
     // recovery below applies that report from the journal instead.
     const auto generation = gate_->advance();
-    const auto before = book_.fills_applied();
-    const auto duplicates_before = book_.duplicates_ignored();
     auto fresh = build(generation, true);
     {
         std::lock_guard lock(mutex_);
@@ -528,17 +538,20 @@ RecoveryResult PositionComponent::recover(const std::string& cause) {
     if (!result.ok) {
         return result;
     }
-    const auto applied = book_.fills_applied() - before;
-    const auto recognised = book_.duplicates_ignored() - duplicates_before;
+    const auto recovered = fresh->stats().recovered;
     if (context_.journal == nullptr) {
         result.detail = "restarted cold: fills reported while down are lost";
     } else if (!ready) {
         result.detail = "still reapplying journaled fills";
     } else {
-        result.detail = "reapplied the newest journaled fills: " + std::to_string(applied) +
-                        " missed while down, " + with_commas(recognised) + " recognised as already applied";
+        const auto count = [](std::uint64_t n, const char* noun) {
+            return std::to_string(n) + ' ' + noun + (n == 1U ? "" : "s");
+        };
+        result.detail = "reapplied the newest journaled reports: " + count(recovered.fills, "fill") + " and " +
+                        count(recovered.rejections, "rejection") + " missed while down, " +
+                        with_commas(recovered.already_applied) + " recognised as already applied";
     }
-    result.recovered_records = applied;
+    result.recovered_records = recovered.fills + recovered.rejections;
     return result;
 }
 

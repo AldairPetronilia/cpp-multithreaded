@@ -43,7 +43,7 @@ struct ComponentContext {
 // missed, which are the newest ones, and the book recognises the rest by order id. Reapplying
 // the whole history would lean on the book's deduplication window, which spans a redelivery,
 // not a session: past 65,536 fills the oldest would count twice.
-void reapply_recent_reports(JournalWriter& journal, PositionBook& book);
+RecoveredReports reapply_recent_reports(JournalWriter& journal, PositionBook& book);
 
 // Each component below follows the same recovery recipe:
 //   1. abandon the failed instance (it may be stuck; never wait for it) and bury it,

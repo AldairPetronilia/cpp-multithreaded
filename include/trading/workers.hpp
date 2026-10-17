@@ -433,9 +433,11 @@ struct PositionEntry {
 
 enum class ApplyResult {
     applied,
+    // A rejection, seen for the first time: it moves no position but is still the order's
+    // outcome.
     not_filled,
-    // A fill for an order id that was already applied: redelivery after a restart, or a
-    // report published by both a recovered and an original completion.
+    // A report for an order id that already has its outcome: redelivery after a restart, or
+    // a report published by both a recovered and an original completion.
     duplicate,
 };
 
@@ -463,6 +465,18 @@ private:
     std::uint64_t duplicates_ignored_{};
     std::unordered_set<std::string> applied_ids_;
     std::deque<std::string> applied_order_;
+    // Rejections are remembered apart from fills: a rejected order can still fill after a
+    // resubmission, but the same rejection reported twice is one outcome, not two.
+    std::unordered_set<std::string> rejected_ids_;
+    std::deque<std::string> rejected_order_;
+};
+
+// What a replacement position monitor applied from the journal: the outcomes its
+// predecessor missed, and how many it found already applied.
+struct RecoveredReports {
+    std::uint64_t fills{};
+    std::uint64_t rejections{};
+    std::uint64_t already_applied{};
 };
 
 struct PositionMonitorConfig {
@@ -478,6 +492,9 @@ struct PositionMonitorStats {
     HistogramSnapshot api_queue{};
     HistogramSnapshot rate_limit_wait{};
     HistogramSnapshot api_service{};
+    // Applied from the journal when this instance started, and included in fills and
+    // rejections above.
+    RecoveredReports recovered{};
 };
 
 class PositionMonitor {
@@ -488,8 +505,9 @@ public:
     // gate's current one, so a replaced monitor that wakes up cannot touch the book.
     void set_fence(std::shared_ptr<GenerationGate> gate, std::uint64_t generation);
     // Runs on the worker thread before it consumes its mailbox; a replacement uses it to
-    // reapply the journaled execution reports its predecessor missed.
-    void set_recovery(std::function<void()> recovery);
+    // reapply the journaled execution reports its predecessor missed. What it applied counts
+    // as this monitor's fills and rejections, since no handler will see those reports.
+    void set_recovery(std::function<RecoveredReports()> recovery);
     void set_fault(std::shared_ptr<FaultControl> fault) { fault_ = std::move(fault); }
     void set_crash_hook(std::function<void()> hook) { worker_.set_crash_hook(std::move(hook)); }
 
@@ -514,6 +532,9 @@ private:
     std::atomic<std::uint64_t> fills_{0};
     std::atomic<std::uint64_t> rejections_{0};
     std::atomic<std::uint64_t> duplicates_{0};
+    std::atomic<std::uint64_t> recovered_fills_{0};
+    std::atomic<std::uint64_t> recovered_rejections_{0};
+    std::atomic<std::uint64_t> recovered_already_applied_{0};
     LatencyHistogram end_to_end_;
     LatencyHistogram api_queue_;
     LatencyHistogram rate_limit_wait_;

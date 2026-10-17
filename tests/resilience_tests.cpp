@@ -580,9 +580,15 @@ void position_book_applies_each_order_once() {
     rejection.filled = false;
     rejection.client_order_id = "s:alpha:AAPL:3";
     CHECK(book.apply(rejection) == trading::ApplyResult::not_filled);
+    // The same rejection reported again is one outcome, not two.
+    CHECK(book.apply(rejection) == trading::ApplyResult::duplicate);
     // A rejection does not use up the id, so the order can still fill after a resubmission.
     rejection.filled = true;
     CHECK(book.apply(rejection) == trading::ApplyResult::applied);
+    // And an order that filled cannot then be rejected as well.
+    rejection.filled = false;
+    CHECK(book.apply(rejection) == trading::ApplyResult::duplicate);
+    CHECK(book.fills_applied() == 3U && book.duplicates_ignored() == 4U);
 }
 
 void stall_detector_tells_idle_from_stuck() {
@@ -1027,8 +1033,18 @@ void the_execution_worker_and_position_monitor_are_supervised_too() {
     CHECK(eventually([&] { return restarted(system, "order-execution", 1) && restarted(system, "position-monitor", 1); },
                      20s));
     system.stop();
+    // Each crash fires on the event its worker was about to handle, so the replacements had
+    // something to recover: the position monitor a report it never applied, which it took
+    // from the journal. Every signal still has exactly one outcome, and the counters show it.
     const auto final_state = system.snapshot();
-    CHECK(final_state.position_monitor.fills > 0U || total_signals(final_state) == 0U);
+    const auto& monitor = final_state.position_monitor;
+    CHECK(total_signals(final_state) > 0U);
+    CHECK(monitor.fills + monitor.rejections == total_signals(final_state));
+    std::uint64_t book_fills = 0;
+    for (const auto& position : final_state.positions) {
+        book_fills += position.fills;
+    }
+    CHECK(book_fills == monitor.fills);
 }
 
 void a_crashed_feed_resumes_its_sequence() {
@@ -1385,13 +1401,33 @@ void position_recovery_never_counts_an_old_fill_twice() {
             CHECK(journal.sync());  // keeps the tap from overflowing
         }
     }
+    // Two rejections at the end: the book saw the first, and the monitor died before the second.
+    for (std::uint64_t index = total + 1; index <= total + 2; ++index) {
+        trading::ExecutionReportEvent rejection{.strategy = "alpha",
+                                                .signal_id = index,
+                                                .client_order_id = "f:" + std::to_string(index),
+                                                .symbol = "AAPL",
+                                                .side = trading::Side::buy,
+                                                .quantity = 1.0,
+                                                .filled = false,
+                                                .market_data_time = now,
+                                                .execution_time = now};
+        if (index == total + 1) {
+            CHECK(book.apply(rejection) == trading::ApplyResult::not_filled);
+        }
+        bus.publish(std::move(rejection));
+    }
     CHECK(journal.sync());
     CHECK(journal.stats().gaps == 0U);
 
-    trading::reapply_recent_reports(journal, book);
+    const auto recovered = trading::reapply_recent_reports(journal, book);
     // Exactly the missed fills were added; nothing older was applied a second time.
     CHECK(book.position("alpha", "AAPL") == static_cast<double>(total));
     CHECK(book.fills_applied() == total);
+    // And recovery reports what it added, so the monitor can count those outcomes.
+    CHECK(recovered.fills == missed);
+    CHECK(recovered.rejections == 1U);
+    CHECK(recovered.already_applied > 0U);
     journal.stop();
 }
 
@@ -1453,6 +1489,8 @@ void a_hung_position_monitor_cannot_touch_the_book_when_it_wakes() {
         fills += position.fills;
     }
     CHECK(fills == total_signals(final_state));
+    // The monitor's own count agrees with the book, the recovered fill included.
+    CHECK(final_state.position_monitor.fills + final_state.position_monitor.rejections == total_signals(final_state));
 }
 
 trading::GatewayPool::Member pool_member(const std::string& name, std::shared_ptr<trading::IApiClient> broker,

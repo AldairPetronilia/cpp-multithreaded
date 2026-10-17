@@ -773,22 +773,40 @@ void OrderExecutionWorker::reconcile(const TradingSignalEvent& signal, std::chro
     submit_order(signal, order_id);
 }
 
-ApplyResult PositionBook::apply(const ExecutionReportEvent& execution) {
-    if (!execution.filled) {
-        return ApplyResult::not_filled;
+namespace {
+
+// Adds id to a window of the newest kDedupeWindow ids; false if it was already there.
+bool remember(std::unordered_set<std::string>& ids, std::deque<std::string>& order, const std::string& id) {
+    if (!ids.insert(id).second) {
+        return false;
     }
-    const auto signed_quantity = execution.side == Side::buy ? execution.quantity : -execution.quantity;
+    order.push_back(id);
+    while (order.size() > PositionBook::kDedupeWindow) {
+        ids.erase(order.front());
+        order.pop_front();
+    }
+    return true;
+}
+
+}  // namespace
+
+ApplyResult PositionBook::apply(const ExecutionReportEvent& execution) {
     std::lock_guard lock(mutex_);
-    if (!execution.client_order_id.empty()) {
-        if (!applied_ids_.insert(execution.client_order_id).second) {
+    if (!execution.filled) {
+        // An order that filled cannot also be rejected, and one rejection is one outcome
+        // however often it is reported.
+        if (!execution.client_order_id.empty() &&
+            (applied_ids_.contains(execution.client_order_id) ||
+             !remember(rejected_ids_, rejected_order_, execution.client_order_id))) {
             ++duplicates_ignored_;
             return ApplyResult::duplicate;
         }
-        applied_order_.push_back(execution.client_order_id);
-        while (applied_order_.size() > kDedupeWindow) {
-            applied_ids_.erase(applied_order_.front());
-            applied_order_.pop_front();
-        }
+        return ApplyResult::not_filled;
+    }
+    const auto signed_quantity = execution.side == Side::buy ? execution.quantity : -execution.quantity;
+    if (!execution.client_order_id.empty() && !remember(applied_ids_, applied_order_, execution.client_order_id)) {
+        ++duplicates_ignored_;
+        return ApplyResult::duplicate;
     }
     auto& entry = positions_[{execution.strategy, execution.symbol}];
     if (entry.fills == 0U) {
@@ -855,9 +873,16 @@ void PositionMonitor::set_fence(std::shared_ptr<GenerationGate> gate, std::uint6
     generation_ = generation;
 }
 
-void PositionMonitor::set_recovery(std::function<void()> recovery) {
+void PositionMonitor::set_recovery(std::function<RecoveredReports()> recovery) {
     if (recovery) {
-        worker_.set_start_hook(std::move(recovery));
+        worker_.set_start_hook([this, recovery = std::move(recovery)] {
+            const auto recovered = recovery();
+            fills_.fetch_add(recovered.fills, std::memory_order_relaxed);
+            rejections_.fetch_add(recovered.rejections, std::memory_order_relaxed);
+            recovered_fills_.store(recovered.fills, std::memory_order_relaxed);
+            recovered_rejections_.store(recovered.rejections, std::memory_order_relaxed);
+            recovered_already_applied_.store(recovered.already_applied, std::memory_order_relaxed);
+        });
     }
 }
 
@@ -883,6 +908,11 @@ PositionMonitorStats PositionMonitor::stats() const {
         api_queue_.snapshot(),
         rate_limit_wait_.snapshot(),
         api_service_.snapshot(),
+        RecoveredReports{
+            recovered_fills_.load(std::memory_order_relaxed),
+            recovered_rejections_.load(std::memory_order_relaxed),
+            recovered_already_applied_.load(std::memory_order_relaxed),
+        },
     };
 }
 
